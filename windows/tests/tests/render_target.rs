@@ -227,6 +227,61 @@ fn render_to_texture_then_sample() {
 }
 
 #[test]
+fn alternating_independent_targets_preserve_draw_order_and_depth() {
+    let h = Harness::new();
+    let backbuffer = h.render_target(0);
+    let depth = h.create_depth_stencil_surface(640, 480, D3DFMT_D24S8);
+    assert_eq!(h.set_depth_stencil_surface(&depth), 0);
+    let texture = h.create_texture(
+        640,
+        480,
+        1,
+        D3DUSAGE_RENDERTARGET,
+        D3DFMT_A8R8G8B8,
+        D3DPOOL_DEFAULT,
+    );
+    let surface = texture.surface_level(0);
+    assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), 0);
+    h.select_diffuse_stage(0);
+    assert_eq!(h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE), 0);
+    assert_eq!(h.set_render_state(D3DRS_ZENABLE, 1), 0);
+    assert_eq!(h.set_render_state(D3DRS_ZWRITEENABLE, 1), 0);
+    assert_eq!(h.set_render_state(D3DRS_ZFUNC, D3DCMP_LESS), 0);
+    assert_eq!(
+        h.clear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, BLACK, 1.0, 0),
+        0
+    );
+    let mut near = fullscreen_triangle(RED);
+    for vertex in &mut near {
+        vertex.z = 0.25;
+    }
+    assert_eq!(h.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &near), 0);
+    assert_eq!(h.set_render_target(0, &surface), 0);
+    assert_eq!(h.clear_depth_stencil_surface(), 0);
+    draw_fill(&h, GREEN);
+    assert_eq!(h.set_render_target(0, &backbuffer), 0);
+    assert_eq!(h.set_depth_stencil_surface(&depth), 0);
+    let mut far = fullscreen_triangle(BLUE);
+    for vertex in &mut far {
+        vertex.z = 0.75;
+    }
+    assert_eq!(h.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &far), 0);
+    assert_eq!(h.set_render_target(0, &surface), 0);
+    assert_eq!(h.clear_depth_stencil_surface(), 0);
+    draw_fill(&h, WHITE);
+    assert_eq!(
+        read_surface_pixel(&h, &backbuffer, 320, 240),
+        RED,
+        "the later farther draw remains behind the earlier red draw"
+    );
+    assert_eq!(
+        read_surface_pixel(&h, &surface, 320, 240),
+        WHITE,
+        "the second independent-target draw remains last"
+    );
+}
+
+#[test]
 fn depth_test_near_occludes_far() {
     let h = Harness::with_depth();
     assert_eq!(h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE), 0, "SetFVF");
@@ -3724,6 +3779,48 @@ fn depth_survives_a_mid_frame_readback_flush() {
         h.read_pixel(320, 240),
         GREEN,
         "the far group failed depth against the primed near depth that survived the flush",
+    );
+}
+
+#[test]
+fn early_submission_preserves_depth_and_changing_draw_snapshots() {
+    let merged = format!(
+        "{};render.submitDraws=1",
+        std::env::var("MTLD3D_CONFIG").unwrap_or_default()
+    );
+    // SAFETY: nextest gives each test its own process; no harness threads exist yet.
+    unsafe { std::env::set_var("MTLD3D_CONFIG", merged) };
+
+    let h = Harness::with_depth();
+    assert!(h.pump());
+    assert_eq!(h.begin_scene(), D3D_OK);
+    assert_eq!(
+        h.clear(D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, BLACK, 1.0, 0),
+        D3D_OK
+    );
+    assert_eq!(h.set_render_state(D3DRS_ZENABLE, 1), D3D_OK);
+    assert_eq!(h.set_render_state(D3DRS_ZWRITEENABLE, 1), D3D_OK);
+    assert_eq!(h.set_render_state(D3DRS_ZFUNC, D3DCMP_LESS), D3D_OK);
+
+    // Every draw uses a new frame arena and an asynchronous continuation. The
+    // colour and depth must survive those boundaries while constants and UP
+    // vertices change. A far red draw must never overwrite the nearest fill.
+    for i in 0..32_u16 {
+        let z = f32::from(i).mul_add(-0.02, 0.8);
+        draw_fill_at_z(&h, if i % 2 == 0 { BLUE } else { GREEN }, z);
+        draw_fill_at_z(&h, RED, 0.95);
+    }
+    assert_eq!(
+        h.read_pixel(320, 240),
+        GREEN,
+        "readback sees all prior chunks"
+    );
+    assert_eq!(h.end_scene(), D3D_OK);
+    assert_eq!(h.present(), D3D_OK);
+    assert_eq!(
+        h.read_pixel(320, 240),
+        GREEN,
+        "present retains the completed scene"
     );
 }
 

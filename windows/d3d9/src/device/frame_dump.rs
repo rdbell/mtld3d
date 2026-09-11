@@ -20,9 +20,9 @@ use core::ffi::c_void;
 
 use log::info;
 use mtld3d_types::{
-    D3DRS_ALPHABLENDENABLE, D3DRS_ALPHAFUNC, D3DRS_ALPHAREF, D3DRS_ALPHATESTENABLE, D3DRS_BLENDOP,
-    D3DRS_BLENDOPALPHA, D3DRS_CCW_STENCILFAIL, D3DRS_CCW_STENCILFUNC, D3DRS_CCW_STENCILPASS,
-    D3DRS_CCW_STENCILZFAIL, D3DRS_COLORWRITEENABLE, D3DRS_COLORWRITEENABLE1,
+    D3DCOLORVALUE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHAFUNC, D3DRS_ALPHAREF, D3DRS_ALPHATESTENABLE,
+    D3DRS_AMBIENT, D3DRS_BLENDOP, D3DRS_BLENDOPALPHA, D3DRS_CCW_STENCILFAIL, D3DRS_CCW_STENCILFUNC,
+    D3DRS_CCW_STENCILPASS, D3DRS_CCW_STENCILZFAIL, D3DRS_COLORWRITEENABLE, D3DRS_COLORWRITEENABLE1,
     D3DRS_COLORWRITEENABLE2, D3DRS_COLORWRITEENABLE3, D3DRS_CULLMODE, D3DRS_DEPTHBIAS,
     D3DRS_DESTBLEND, D3DRS_DESTBLENDALPHA, D3DRS_SCISSORTESTENABLE, D3DRS_SEPARATEALPHABLENDENABLE,
     D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_SRCBLEND, D3DRS_SRCBLENDALPHA, D3DRS_STENCILENABLE,
@@ -342,6 +342,31 @@ impl DeviceInner {
             rs(D3DRS_SCISSORTESTENABLE),
             textures.trim_start(),
         );
+        if let Some(source) = self.snapshot_cache.vs
+            && let VsSource::FixedFunction { key, max_row_count } = source.as_ref()
+        {
+            let material = self.ff_state().material();
+            let color = |value: &D3DCOLORVALUE| [value.r, value.g, value.b, value.a];
+            info!(
+                target: LOG_TARGET,
+                "[dump] draw {seq} ffvs: fvf={:#x} stride0={} rows={max_row_count} \
+                 key={key:?} ambient={:#x} material=[diffuse={:?} ambient={:?} \
+                 specular={:?} emissive={:?} power={}]",
+                self.fvf_field(),
+                self.bound_buffers().stream_stride(0),
+                rs(D3DRS_AMBIENT),
+                color(&material.diffuse),
+                color(&material.ambient),
+                color(&material.specular),
+                color(&material.emissive),
+                material.power,
+            );
+        }
+        if let Some(source) = self.snapshot_cache.ps
+            && let PsSource::FixedFunction { key, .. } = source.as_ref()
+        {
+            info!(target: LOG_TARGET, "[dump] draw {seq} ffps: key={key:?}");
+        }
         // Draws that fetch raw depth reconstruct positions from shared PS
         // constants (screen scale, linearization); print the window those
         // shaders read so wrong uploads are visible next to the draw.

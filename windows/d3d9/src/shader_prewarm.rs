@@ -21,7 +21,7 @@ use std::{
 
 use log::info;
 use mtld3d_core::{
-    shader_cache::{self, CacheEntry, CachedKind, SHADER_CACHE_SCHEMA_VERSION},
+    shader_cache::{self, CacheEntry, CachedKind, CompiledShaders, SHADER_CACHE_SCHEMA_VERSION},
     shader_compile_stats::{CompileBucket, Snapshot, format_summary},
 };
 use mtld3d_shared::{MetalHandle, mtl::StageTag, mtl_handle::MTLDeviceKind};
@@ -96,12 +96,12 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
             target: LOG_TARGET,
             "shader_cache: shaderCache.enable = false, skipping pre-warm"
         );
-        sender.send(Vec::new());
+        sender.send(CompiledShaders::default());
         return;
     }
 
     let Some(path) = shader_cache_path() else {
-        sender.send(Vec::new());
+        sender.send(CompiledShaders::default());
         return;
     };
 
@@ -109,7 +109,7 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Cold start — no file yet.
-            sender.send(Vec::new());
+            sender.send(CompiledShaders::default());
             return;
         }
         Err(e) => {
@@ -137,7 +137,7 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
                 target: LOG_TARGET,
                 "shader_cache: schema {other} != current {SHADER_CACHE_SCHEMA_VERSION}, wiped mtld3d_shaders.bin"
             );
-            sender.send(Vec::new());
+            sender.send(CompiledShaders::default());
             return;
         }
         Err(_) => {
@@ -150,7 +150,7 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
                 target: LOG_TARGET,
                 "shader_cache: wrong magic in mtld3d_shaders.bin, wiped"
             );
-            sender.send(Vec::new());
+            sender.send(CompiledShaders::default());
             return;
         }
     }
@@ -178,7 +178,7 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
         rewrite_as_bundle(&path, &deduped);
     }
 
-    let mut warm: Vec<(u64, StageLibHandles)> = Vec::with_capacity(deduped.len());
+    let mut warm = CompiledShaders::<StageLibHandles>::default();
     let mut counts = [0u32; 4];
     let mut duration_ns = [0u64; 4];
 
@@ -189,20 +189,26 @@ fn run(device_handle: MetalHandle<MTLDeviceKind>, sender: PrewarmSender, stop: &
         let stage = stage_for_kind(entry.kind);
         let entry_name = entry.kind.entry_name(entry.key);
         let started = Instant::now();
-        let Some(handles) = compile_stage_library(device_handle, stage, &entry.msl, &entry_name)
-        else {
+        let Some((_, compiled)) = warm.resolve(entry.key, &entry.msl, &entry_name, || {
+            compile_stage_library(device_handle, stage, &entry.msl, &entry_name)
+        }) else {
             continue;
         };
+        if !compiled {
+            continue;
+        }
         let elapsed = started.elapsed();
         let idx = bucket_index(entry.kind.compile_bucket());
         counts[idx] += 1;
         // u128 nanos → u64: saturates at ~584 years; pre-warm batch fits easily.
         duration_ns[idx] += u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        warm.push((entry.key, handles));
     }
 
     let total: u32 = counts.iter().sum();
     let cached = u32::try_from(warm.len()).unwrap_or(u32::MAX);
+    if warm.reused() > 0 {
+        info!(target: LOG_TARGET, "shaders: prewarm reused {} identical state variants ({cached} unique libraries)", warm.reused());
+    }
     sender.send(warm);
     if total > 0 {
         let snap = Snapshot {

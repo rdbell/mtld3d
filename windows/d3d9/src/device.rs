@@ -431,6 +431,9 @@ pub struct DeviceInner {
     /// the same `MTLDevice`.
     prewarm: crate::shader_prewarm::PrewarmHandle,
     current_frame: FrameData,
+    /// Optional continuation cadence; zero retains whole-frame submission.
+    render_submit_draws: u32,
+    pending_draw_count: u32,
     /// Shared with the encoder thread and the unix completion handler.
     ///
     /// The frame's submit seq is stamped in `stamp_and_swap`; this atomic
@@ -1402,6 +1405,7 @@ impl DeviceInner {
     /// the `submit_seq` it carries. Shared between `Present` and
     /// `flush_current_frame_blocking`.
     fn stamp_and_swap(&mut self, new_frame: FrameData, no_present: bool) -> (FrameData, u64) {
+        self.pending_draw_count = 0;
         let mut frame = core::mem::replace(&mut self.current_frame, new_frame);
         // An F12 run ends with the frame the closing `Present` submits. A
         // mid-frame flush sends the marked frame out early, so its stop mark
@@ -1837,7 +1841,18 @@ impl DeviceInner {
     /// Used by the hot draw path to emit `Op::Set*` + `Op::Draw` without
     /// per-op heap alloc.
     pub fn push_op_inline(&mut self, op: crate::encoder::Op) {
+        let is_draw = matches!(op, Op::Draw(_));
         self.current_frame.push_op_inline(op);
+        if self.render_submit_draws != 0 && is_draw {
+            self.pending_draw_count += 1;
+            if self.pending_draw_count >= self.render_submit_draws {
+                // Use the existing continuation rules and bounded channel.
+                // Readback still drains this queue and waits for GPU completion.
+                let fresh = self.fresh_frame();
+                let (frame, _) = self.stamp_and_swap(fresh, true);
+                self.encoder.send_frame(frame);
+            }
+        }
     }
 
     /// Queue an eager `MTLTexture` create on the current frame.
@@ -2644,6 +2659,8 @@ impl Direct3DDevice9 {
             encoder: info.encoder,
             prewarm: info.prewarm,
             current_frame: info.current_frame,
+            render_submit_draws: crate::config::CONFIG.render_submit_draws,
+            pending_draw_count: 0,
             coherent_seq,
             upload_coherent_seq,
             failed_submit_seq,
@@ -10353,10 +10370,7 @@ fn emit_snapshot_deltas(obj: &Direct3DDevice9) {
         let decl_ptr = dev.vertex_decl();
         let (resolved, vdecl_hash, ff_vs_layout) = if decl_ptr.is_null() {
             let (elements, _fvf_stride) = fvf_to_elements(fvf);
-            // `fvf == 0` only when the format came from SetVertexDeclaration
-            // (SetFVF always carries D3DFVF_XYZ); a real declaration reads 0
-            // for an omitted COLORVERTEX source, FVF falls back to material.
-            let layout = convert::ff_vs_layout_from_elements(&elements, fvf == 0);
+            let layout = convert::ff_vs_layout_from_elements(&elements);
             // Pre-transformed (POSITIONT/XYZRHW) layouts bypass a bound VS —
             // D3D9 runs the FF pre-transformed path regardless, even when a
             // VS is still bound — so the attrs must resolve for the FF VS too.
@@ -10372,7 +10386,7 @@ fn emit_snapshot_deltas(obj: &Direct3DDevice9) {
             // SAFETY: non-null check passed; refcount holds it live.
             let decl = unsafe { &*decl_ptr };
             let elements = decl.inner().elements();
-            let layout = convert::ff_vs_layout_from_elements(elements, fvf == 0);
+            let layout = convert::ff_vs_layout_from_elements(elements);
             // See the FVF arm: POSITIONT bypasses a bound VS.
             let resolved = if bound_vertex_shader.is_null() || layout.has_rhw() {
                 resolve_attrs_for_ff(elements)
@@ -11479,7 +11493,7 @@ extern "system" fn device_set_vertex_declaration(this: *mut c_void, decl: *mut c
         // unconditionally.
         let new_rhw = !new.is_null()
             // SAFETY: non-null checked; the slot adopted a ref above.
-            && convert::ff_vs_layout_from_elements(unsafe { (*new).inner().elements() }, true)
+            && convert::ff_vs_layout_from_elements(unsafe { (*new).inner().elements() })
                 .has_rhw();
         if new_rhw || dev.cached_ff_vs_layout.has_rhw() {
             mask |= SnapshotDirty::VS_CONST | SnapshotDirty::VARIANT;

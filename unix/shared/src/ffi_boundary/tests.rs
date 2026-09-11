@@ -68,6 +68,20 @@ fn out_ptr_opt_filters_null() {
 }
 
 #[test]
+fn out_ptr_writes_unaligned_storage_without_touching_neighbors() {
+    let mut storage = [u64::MAX; 3];
+    let raw = storage.as_mut_ptr().wrapping_byte_add(2);
+    assert!(!raw.is_aligned());
+    // SAFETY: `raw` spans eight writable bytes in the local storage; alignment is not required.
+    let out = unsafe { OutPtr::opt(raw) }.unwrap();
+    out.write(0x1122_3344_5566_7788);
+    let bytes: Vec<_> = storage.iter().flat_map(|word| word.to_ne_bytes()).collect();
+    assert_eq!(&bytes[2..10], &0x1122_3344_5566_7788_u64.to_ne_bytes());
+    assert!(bytes[..2].iter().all(|byte| *byte == 0xff));
+    assert!(bytes[10..].iter().all(|byte| *byte == 0xff));
+}
+
+#[test]
 fn vtable_this_round_trip() {
     let mut p = Point { x: 10, y: 20 };
     let raw: *mut c_void = (&raw mut p).cast();

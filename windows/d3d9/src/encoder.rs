@@ -39,7 +39,7 @@ use mtld3d_core::{
     render_scale::RenderScale,
     sampler_state,
     scratch::ScratchArena,
-    shader_cache::{self, CachedKind},
+    shader_cache::{self, CachedKind, CompiledShaders},
     shader_compile_stats::{self, BurstTracker, CompileBucket},
     storage_policy::{buffer_storage_mode, gpu_written_buffer_storage_mode},
     stretch_rect::StretchRegion,
@@ -1044,18 +1044,13 @@ pub struct FrameEncoder {
     /// declared sampler the game left unbound. Only PS programs get an entry;
     /// VS programs (no samplers) fall through to the empty default.
     prog_sampler_decls: FxHashMap<ProgramId, PsSamplerDecls>,
-    /// Compiled `MTLLibrary` handles keyed by content hash (`disk_key`).
+    /// Compiled libraries indexed by state key and exact emitted source.
     ///
-    /// One entry per unique shader source; a single shader compiled
-    /// for multiple `VsKey` / `PsKey` variants shares the same entry
-    /// because variants either don't change MSL (VS) or do change it
-    /// (PS) — and either way the `disk_key` derivation matches the MSL
-    /// the shader will produce. Pre-warm ingest and live miss-compile
-    /// both populate it; lookups happen by `disk_key`. No longer the
-    /// per-draw lookup path — that goes through the source-keyed indices
-    /// below; `lib_cache` is now the warm-load landing zone + disk-write
-    /// index, consulted only on an index miss (≈ once per shader).
-    lib_cache: FxHashMap<u64, StageLibHandles>,
+    /// State keys can differ only in state the emitter ignores. Source equality, with
+    /// the generated entry name removed, shares their functions and pipeline-cache hits.
+    /// Consulted only on a miss in the per-draw indices below. Owns each handle once.
+    lib_cache: CompiledShaders<StageLibHandles>,
+    shader_reuse_reported: usize,
     /// Per-draw shader-library lookup, keyed on the shader-identity struct.
     ///
     /// `FxHash` + exact `Eq`, probed by borrow — no per-draw content hash,
@@ -1513,7 +1508,8 @@ impl FrameEncoder {
             last_pipeline_memo: None,
             program_cache: FxHashMap::default(),
             prog_sampler_decls: FxHashMap::default(),
-            lib_cache: FxHashMap::default(),
+            lib_cache: CompiledShaders::default(),
+            shader_reuse_reported: 0,
             ff_vs_libs: FxHashMap::default(),
             prog_vs_libs: FxHashMap::default(),
             ff_ps_libs: FxHashMap::default(),
@@ -4745,6 +4741,11 @@ impl FrameEncoder {
         self.scratch.alloc(data)
     }
 
+    /// Copy inline vertices and zero their out-of-range attribute tail.
+    pub fn alloc_scratch_padded(&mut self, data: &[u8], padding: usize) -> u64 {
+        self.scratch.alloc_padded(data, padding)
+    }
+
     /// Apply an `Op::SetVsConstRange` delta to the encoder-side VS mirror.
     ///
     /// Reads `rows × 16` bytes from `data` (a scratch-allocated slice from
@@ -5052,12 +5053,11 @@ impl FrameEncoder {
     /// the rest of the session skips the open/append entirely.
     pub fn ingest_warm_cache(
         &mut self,
-        entries: Vec<(u64, StageLibHandles)>,
+        entries: CompiledShaders<StageLibHandles>,
         writes_disabled: bool,
     ) {
-        for (key, handles) in entries {
-            self.lib_cache.insert(key, handles);
-        }
+        self.shader_reuse_reported = entries.reused();
+        self.lib_cache = entries;
         self.flags.insert(FrameEncoderFlags::CACHE_READY);
         if writes_disabled {
             self.flags.insert(FrameEncoderFlags::CACHE_DISABLED);
@@ -5080,6 +5080,12 @@ impl FrameEncoder {
     /// poll cost stays in the few-cycle range — no `Instant::now()`
     /// syscall.
     pub fn maybe_emit_compile_summary(&mut self) {
+        // Report reuse in batches; no per-draw log or clock read on the cache-hit path.
+        let reused = self.lib_cache.reused();
+        if reused.saturating_sub(self.shader_reuse_reported) >= 32 {
+            log::info!(target: LOG_TARGET, "shaders: {reused} state variants reused identical compiled source ({} unique libraries)", self.lib_cache.len());
+            self.shader_reuse_reported = reused;
+        }
         let counts = shader_compile_stats::current_counts();
         let idle = secs_to_cycles(1);
         if !self.compile_burst.poll(counts, rdtsc(), idle) {
@@ -5261,15 +5267,16 @@ impl FrameEncoder {
             let tag = shader_source_tag_vs(source);
             trace!(target: MSL_TRACE_TARGET, "── VS MSL {tag} ──\n{msl}\n── /VS MSL {tag} ──");
         }
-        let handles =
-            compile_stage_library(self.device_handle, StageTag::Vertex, &msl, &entry_name)?;
-        if let Some(b) = bucket {
+        let device = self.device_handle;
+        let (&handles, compiled) = self.lib_cache.resolve(disk_key, &msl, &entry_name, || {
+            compile_stage_library(device, StageTag::Vertex, &msl, &entry_name)
+        })?;
+        if compiled && let Some(b) = bucket {
             shader_compile_stats::record(b, started.elapsed());
         }
-        if let Some(kind) = kind {
+        if compiled && let Some(kind) = kind {
             self.cache_write_record(kind, disk_key, &msl);
         }
-        self.lib_cache.insert(disk_key, handles);
         Some(handles)
     }
 
@@ -5359,15 +5366,16 @@ impl FrameEncoder {
             let tag = shader_source_tag_ps(source, variant);
             trace!(target: MSL_TRACE_TARGET, "── PS MSL {tag} ──\n{msl}\n── /PS MSL {tag} ──");
         }
-        let handles =
-            compile_stage_library(self.device_handle, StageTag::Fragment, &msl, &entry_name)?;
-        if let Some(b) = bucket {
+        let device = self.device_handle;
+        let (&handles, compiled) = self.lib_cache.resolve(disk_key, &msl, &entry_name, || {
+            compile_stage_library(device, StageTag::Fragment, &msl, &entry_name)
+        })?;
+        if compiled && let Some(b) = bucket {
             shader_compile_stats::record(b, started.elapsed());
         }
-        if let Some(kind) = kind {
+        if compiled && let Some(kind) = kind {
             self.cache_write_record(kind, disk_key, &msl);
         }
-        self.lib_cache.insert(disk_key, handles);
         Some(handles)
     }
 
@@ -8479,7 +8487,7 @@ pub struct EncoderThread {
 /// causing the encoder to compile a shader from scratch that the
 /// prewarm is concurrently compiling from disk.
 struct PrewarmPayload {
-    entries: Vec<(u64, StageLibHandles)>,
+    entries: CompiledShaders<StageLibHandles>,
     writes_disabled: bool,
 }
 
@@ -8492,9 +8500,9 @@ pub struct PrewarmSender(mpsc::SyncSender<PrewarmPayload>);
 impl PrewarmSender {
     /// Normal completion.
     ///
-    /// Ship pre-warmed handles (empty vec for a cold start) and let the
+    /// Ship the pre-warmed cache (empty for a cold start) and let the
     /// encoder open the cache for append.
-    pub fn send(self, entries: Vec<(u64, StageLibHandles)>) {
+    pub fn send(self, entries: CompiledShaders<StageLibHandles>) {
         let _ = self.0.send(PrewarmPayload {
             entries,
             writes_disabled: false,
@@ -8510,7 +8518,7 @@ impl PrewarmSender {
     /// stay off for the rest of the session.
     pub fn send_disabled(self) {
         let _ = self.0.send(PrewarmPayload {
-            entries: Vec::new(),
+            entries: CompiledShaders::default(),
             writes_disabled: true,
         });
     }
@@ -8810,7 +8818,7 @@ fn encoder_thread_main(
             target: LOG_TARGET,
             "shader_cache: pre-warm channel closed without payload → starting cold"
         );
-        enc.ingest_warm_cache(Vec::new(), false);
+        enc.ingest_warm_cache(CompiledShaders::default(), false);
     }
 
     loop {
@@ -9466,6 +9474,9 @@ fn trailing_blit_descriptor(trailing_blits: &[BlitCommand]) -> PassDescriptor {
 /// Rule G so the cull picks up the strip.
 fn apply_pass_rules(enc: &mut FrameEncoder, frame_continues: bool) {
     enc.pass_state.coalesce_clear_only_passes();
+    if crate::config::CONFIG.render_merge_passes {
+        enc.pass_state.merge_independent_draw_passes();
+    }
     enc.pass_state.finalize_load_actions();
     enc.pass_state.finalize_store_actions(frame_continues);
     enc.pass_state.strip_dead_color_in_clear_only_passes();

@@ -11,6 +11,7 @@ mod device;
 mod direct3d9;
 mod draw;
 mod encoder;
+mod execute_policy;
 mod fullscreen;
 mod index_buffer;
 mod log_sink;
@@ -152,6 +153,7 @@ pub extern "system" fn direct3d_create9(_sdk_version: u32) -> *mut c_void {
     // The first entry point outside `DllMain`: the logging thread can start
     // here (DllMain runs under the loader lock and must not spawn threads).
     log_sink::start();
+    execute_policy::enforce();
     Box::into_raw(Box::new(Direct3D9::new())).cast::<c_void>()
 }
 

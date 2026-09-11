@@ -18,7 +18,7 @@ use mtld3d_core::{
     ids::BufferId,
     page_box::PageBox,
 };
-use mtld3d_shared::{InPtr, InPtrMut};
+use mtld3d_shared::{InPtr, InPtrMut, OutPtr};
 use mtld3d_types::{
     D3DINDEXBUFFER_DESC, D3DLOCK_DISCARD, D3DLOCK_KNOWN_BITS, D3DLOCK_NOOVERWRITE,
     D3DLOCK_READONLY, D3DRTYPE_INDEXBUFFER, Guid, IDirect3DIndexBuffer9Vtbl,
@@ -502,18 +502,18 @@ extern "system" fn ib_lock(
     flags: u32,
 ) -> i32 {
     let _timer = ib_timer(this);
-    if pp_data.is_null() {
+    // SAFETY: the Lock ABI supplies a writable pointer-sized output slot for the call.
+    // The caller may place that slot in a packed structure.
+    let Some(out) = (unsafe { OutPtr::opt(pp_data) }) else {
         return D3DERR_INVALIDCALL;
-    }
+    };
     // SAFETY: vtable thunk; `this` is *mut Direct3DIndexBuffer9 per ABI.
     let Some(mut obj) = (unsafe { InPtrMut::<Direct3DIndexBuffer9>::opt(this) }) else {
         return D3DERR_INVALIDCALL;
     };
     let inner = obj.inner_mut();
     if offset_to_lock > inner.length {
-        // SAFETY: `pp_data` is non-null (checked above) and per the D3D9
-        // ABI points to a writable `*mut c_void` slot owned by the caller.
-        unsafe { *pp_data = core::ptr::null_mut() };
+        out.write(core::ptr::null_mut());
         return D3DERR_INVALIDCALL;
     }
     if size_to_lock != 0 && offset_to_lock.saturating_add(size_to_lock) > inner.length {
@@ -674,14 +674,10 @@ extern "system" fn ib_lock(
     // allocated for `inner.length` bytes, so the offset lands inside it.
     let Some(ptr) = inner.backing.write_ptr_at(offset_to_lock as usize) else {
         mtld3d_shared::log_once_warn!(target: crate::LOG_TARGET, "ib_lock: no backing to map");
-        // SAFETY: `pp_data` is non-null (checked above) and per the D3D9
-        // ABI points to a writable `*mut c_void` slot owned by the caller.
-        unsafe { *pp_data = core::ptr::null_mut() };
+        out.write(core::ptr::null_mut());
         return D3DERR_INVALIDCALL;
     };
-    // SAFETY: `pp_data` is non-null (checked above) and per the D3D9
-    // ABI points to a writable `*mut c_void` slot owned by the caller.
-    unsafe { *pp_data = ptr.cast::<c_void>() };
+    out.write(ptr.cast::<c_void>());
     D3D_OK
 }
 

@@ -177,6 +177,28 @@ impl ScratchArena {
         ptr as u64
     }
 
+    /// Copy a payload followed by explicitly zeroed padding into stable storage.
+    ///
+    /// Reused chunks contain old frame data, so the padding is written on every
+    /// allocation. The pointer remains valid until the next `clear()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload length plus padding overflows `usize`.
+    pub fn alloc_padded(&mut self, data: &[u8], padding: usize) -> u64 {
+        let size = data
+            .len()
+            .checked_add(padding)
+            .expect("scratch padded size fits usize");
+        let ptr = self.reserve(size);
+        // SAFETY: reserve returns size writable, initialized bytes in an arena
+        // chunk; data is a separate allocation and no slice to this region exists.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, size) };
+        bytes[..data.len()].copy_from_slice(data);
+        bytes[data.len()..].fill(0);
+        ptr as u64
+    }
+
     /// Bump-allocate uninitialised space for one `T` and return a raw pointer.
     ///
     /// Caller writes the value via `ptr::write` or per-field

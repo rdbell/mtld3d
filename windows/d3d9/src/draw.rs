@@ -28,8 +28,8 @@ use mtld3d_core::{
     scratch::ScratchArena,
     shader_cache,
     streams::{
-        bound_stream_layout, instance_count, instanced_stream_read_bytes, is_instance_data,
-        layout_stride,
+        bound_stream_layout, cover_stream_extent, instance_count, instanced_stream_read_bytes,
+        is_instance_data, layout_stride,
     },
     vs_draw::{MAX_CLIP_PLANES, VS_DRAW_BYTES, build_vs_draw_bytes},
 };
@@ -2187,9 +2187,24 @@ pub fn emit_draw(enc: &mut FrameEncoder, draw: DrawOp) {
     //    and churns only when the game renames.
     let t_vbib = CycleAddTimer::start(enc.op_sub_detail_ptr(OpSubDetail::BVbib));
     match &vertex_source {
-        VertexSource::Up { bytes, size, .. } => {
-            let scratch_ptr = enc.alloc_scratch(bytes);
-            enc.emit_command(Command::set_vertex_bytes(scratch_ptr, *size, 0));
+        VertexSource::Up {
+            bytes,
+            size,
+            stride,
+        } => {
+            let padding = attrs.extents[0].saturating_sub(*stride);
+            let Some(padded_size) = size.checked_add(padding) else {
+                mtld3d_shared::log_once_warn!(target: crate::LOG_TARGET,
+                    "draw dropped: inline vertex extent exceeds the buffer size limit"
+                );
+                return;
+            };
+            let scratch_ptr = if padding == 0 {
+                enc.alloc_scratch(bytes)
+            } else {
+                enc.alloc_scratch_padded(bytes, padding as usize)
+            };
+            enc.emit_command(Command::set_vertex_bytes(scratch_ptr, padded_size, 0));
             // Inline slot-0 bind clobbers the real Metal vertex-buffer
             // binding; drop the cached bound-VB so the next bound draw
             // re-emits its `setVertexBuffer` instead of reading these bytes.
@@ -2323,7 +2338,11 @@ pub fn emit_draw(enc: &mut FrameEncoder, draw: DrawOp) {
                     enc.note_buffer_draw_range(
                         b.buffer_id.raw(),
                         range_off,
-                        range_size,
+                        cover_stream_extent(
+                            range_size,
+                            layout.stride,
+                            attrs.extents[slot as usize],
+                        ),
                         logical_len,
                     );
                 }

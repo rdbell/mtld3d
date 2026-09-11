@@ -144,26 +144,30 @@ pub const fn instanced_stream_read_bytes(
 
 /// The stride a stream's vertex buffer layout steps by.
 ///
-/// The application's stride wins when it covers the extent of the declaration
-/// elements the shader consumes on that stream (it can exceed it when the
-/// vertex struct carries fields past them). A zero stride returns the extent:
+/// Every nonzero application stride is preserved, including overlapping
+/// attributes that extend into the next vertex's storage. Widening the layout
+/// without repacking the buffer would change every fetch after the first.
+/// A zero stride returns the extent:
 /// the inline (UP) path has no other span, and [`bound_stream_layout`] pairs it
-/// with a `Constant` step. A non-zero stride smaller than the consumed extent
-/// means the shader reads an attribute past the end of each vertex, which
-/// Metal rejects as a pipeline, so the layout is widened to the extent with a
-/// warning; the affected draw fetches wrong data either way.
+/// with a `Constant` step.
 #[must_use]
-pub fn layout_stride(app_stride: u32, extent: u32) -> u32 {
+pub const fn layout_stride(app_stride: u32, extent: u32) -> u32 {
     if app_stride == 0 {
         return extent;
     }
-    if app_stride < extent {
-        mtld3d_shared::log_once_warn!(target: crate::LOG_TARGET,
-            "stream stride {app_stride} below the consumed declaration extent {extent}; layout widened to the extent"
-        );
-        return extent;
-    }
     app_stride
+}
+
+/// Cover attributes extending past the final stride of a tracked stream read.
+///
+/// A zero size means "to end of buffer" and stays zero. Saturation preserves
+/// conservative coverage when adding the tail would overflow.
+#[must_use]
+pub const fn cover_stream_extent(size: u32, stride: u32, extent: u32) -> u32 {
+    if size == 0 {
+        return 0;
+    }
+    size.saturating_add(extent.saturating_sub(stride))
 }
 
 /// The vertex buffer layout of a stream with a vertex buffer bound.
@@ -177,7 +181,7 @@ pub fn layout_stride(app_stride: u32, extent: u32) -> u32 {
 /// stream per vertex would fetch past the buffer's end). Any other stride
 /// steps per the frequency word.
 #[must_use]
-pub fn bound_stream_layout(app_stride: u32, extent: u32, freq: u32) -> StreamLayout {
+pub const fn bound_stream_layout(app_stride: u32, extent: u32, freq: u32) -> StreamLayout {
     if app_stride == 0 {
         return StreamLayout {
             stride: extent,

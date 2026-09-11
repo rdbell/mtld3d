@@ -2746,6 +2746,8 @@ fn refresh_lockable_rt_staging(inner: &mut SurfaceInner) {
 /// rendered content. A blit failure leaves the staging as-is (the zero-init /
 /// prior content) — the lock still succeeds.
 fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
+    let timer = log::log_enabled!(target: "mtld3d::readback", log::Level::Trace)
+        .then(std::time::Instant::now);
     let (width, height) = (inner.standalone_width, inner.standalone_height);
     let tex_handle = inner.live_color_handle();
     if bpp == 0 || width == 0 || height == 0 || tex_handle.is_null() {
@@ -2798,6 +2800,7 @@ fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
     // `finalize_store_actions` keeps the rendered content.
     device_inner.push_op(Box::new(move |enc| enc.note_color_read_back(tex_handle)));
     device_inner.flush_current_frame_blocking();
+    let flush_elapsed = timer.map(|start| start.elapsed());
     let mut params = BlitTextureToBufferParams {
         queue_handle: device_inner.queue_handle(),
         device_handle: device_inner.device_handle(),
@@ -2822,6 +2825,12 @@ fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
         block_height: 1,
     };
     let status = unix_call(&mut params);
+    if let (Some(start), Some(flush)) = (timer, flush_elapsed) {
+        log::trace!(target: "mtld3d::readback",
+            "lockable_rt {width}x{height} flush_ms={:.3} read_ms={:.3} status={status:#x}",
+            flush.as_secs_f64() * 1000.0,
+            start.elapsed().saturating_sub(flush).as_secs_f64() * 1000.0);
+    }
     if status != 0 {
         mtld3d_shared::log_once_warn!(target: crate::LOG_TARGET,
             "lockable RT LockRect read-back: BlitTextureToBuffer failed status={status:#x} (staging left as-is)"

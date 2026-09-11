@@ -5555,3 +5555,5 @@ impl LastBoundCache {
 
 #[cfg(test)]
 mod tests;
+
+mod merge;

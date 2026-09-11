@@ -35,6 +35,7 @@ fn defaults_match_documented_values() {
     assert!(d.bytecode_dump_dir.is_empty());
     assert!(d.skip_shaders.is_empty());
     assert!(!d.query_flush_immediate);
+    assert_eq!(d.render_submit_draws, 0);
     assert!(!d.buffer_ignore_lock_bounds);
     assert_eq!(d.vbib_retention_cap_bytes, 512 * 1024 * 1024);
     assert_eq!(d.pagebox_pool_cap_bytes, 128 * 1024 * 1024);
@@ -191,6 +192,12 @@ fn buffer_ignore_lock_bounds_defaults_off_and_round_trips() {
     assert!(cfg.buffer_ignore_lock_bounds);
     let cfg = parse(None, "buffer.ignoreLockBounds = false\n", None);
     assert!(!cfg.buffer_ignore_lock_bounds);
+}
+
+#[test]
+fn merge_passes_defaults_off_and_accepts_an_explicit_override() {
+    assert!(!parse(None, "", None).render_merge_passes);
+    assert!(parse(None, "render.mergePasses = true\n", None).render_merge_passes);
 }
 
 #[test]

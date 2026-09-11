@@ -5,11 +5,12 @@
 //! (count, step rate, and the non-indexed exemption), and state-block capture
 //! of stream bindings and frequencies.
 
-use mtld3d_tests::{Harness, PosVertex};
+use mtld3d_tests::{DrawIndexedUpParams, Harness, PosVertex};
 use mtld3d_types::{
     D3D_OK, D3DDECL_END_STREAM, D3DDECLTYPE_D3DCOLOR, D3DDECLTYPE_FLOAT3, D3DDECLTYPE_UNUSED,
     D3DDECLUSAGE_COLOR, D3DDECLUSAGE_POSITION, D3DDECLUSAGE_TEXCOORD, D3DERR_INVALIDCALL,
-    D3DFMT_INDEX16, D3DPOOL_DEFAULT, D3DPT_TRIANGLELIST, D3DSBT_ALL, D3DSTREAMSOURCE_INDEXEDDATA,
+    D3DFMT_INDEX16, D3DPOOL_DEFAULT, D3DPT_POINTLIST, D3DPT_TRIANGLEFAN, D3DPT_TRIANGLELIST,
+    D3DRS_LIGHTING, D3DRS_POINTSIZE, D3DSBT_ALL, D3DSTREAMSOURCE_INDEXEDDATA,
     D3DSTREAMSOURCE_INSTANCEDATA, D3DUSAGE_WRITEONLY, D3DVERTEXELEMENT9,
 };
 
@@ -255,6 +256,184 @@ fn stride_below_an_unconsumed_decl_tail_still_fetches_vertices() {
         h.read_pixel(320, 280),
         GREEN,
         "vertices step by the bound stride, not the unconsumed tail's extent"
+    );
+}
+
+// Read before Present: a DISCARD backbuffer has undefined contents afterwards.
+fn render_stream_test(h: &Harness, body: impl FnOnce(&Harness)) {
+    assert_eq!(h.begin_scene(), D3D_OK);
+    assert_eq!(h.clear_target(BLUE), D3D_OK);
+    body(h);
+    assert_eq!(h.end_scene(), D3D_OK);
+}
+
+const fn overlapping_declaration() -> [D3DVERTEXELEMENT9; 3] {
+    let mut position = element(0, D3DDECLTYPE_FLOAT3, D3DDECLUSAGE_POSITION);
+    position.offset = 8;
+    let mut color = element(0, D3DDECLTYPE_D3DCOLOR, D3DDECLUSAGE_COLOR);
+    color.offset = 40;
+    [position, color, end()]
+}
+
+fn overlapping_vertices() -> [[u32; 9]; 5] {
+    let mut vertices = [[0; 9]; 5];
+    for vertex in &mut vertices {
+        vertex[1] = GREEN;
+    }
+    for (vertex, position) in vertices[1..4].iter_mut().zip(centered_triangle()) {
+        vertex[2..5].copy_from_slice(&[
+            position.x.to_bits(),
+            position.y.to_bits(),
+            position.z.to_bits(),
+        ]);
+    }
+    vertices
+}
+
+/// A consumed attribute beyond the stride overlaps the next vertex's storage.
+#[test]
+fn overlapping_bound_vertices_preserve_stride_and_base_vertex() {
+    let h = Harness::new();
+    let decl = h.create_vertex_declaration(&overlapping_declaration());
+    let vs = h.create_vertex_shader(&VS_POS_COLOR);
+    let ps = h.create_pixel_shader(&PS_DIFFUSE);
+    assert_eq!(h.set_vertex_declaration(&decl), D3D_OK);
+    assert_eq!(h.set_vertex_shader(&vs), D3D_OK);
+    assert_eq!(h.set_pixel_shader(&ps), D3D_OK);
+    let vertices = overlapping_vertices();
+    let vb = h.create_vertex_buffer(16 + 5 * 36, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT);
+    vb.lock(16, 5 * 36, 0).write(&vertices);
+    assert_eq!(h.set_stream_source(0, &vb, 16, 36), D3D_OK);
+    for primitive in [D3DPT_TRIANGLELIST, D3DPT_TRIANGLEFAN] {
+        render_stream_test(&h, |d| {
+            assert_eq!(d.draw_primitive(primitive, 1, 1), D3D_OK);
+        });
+        assert_eq!(
+            h.read_pixel(320, 280),
+            GREEN,
+            "non-indexed primitive {primitive}"
+        );
+    }
+    let ib = h.create_index_buffer(6, D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT);
+    assert_eq!(h.set_indices(&ib), D3D_OK);
+    for (base, indices) in [(1, [0u16, 1, 2]), (0, [1, 2, 3]), (-1, [2, 3, 4])] {
+        ib.lock(0, 0, 0).write(&indices);
+        render_stream_test(&h, |d| {
+            assert_eq!(
+                d.draw_indexed_primitive(D3DPT_TRIANGLELIST, base, u32::from(indices[0]), 3, 0, 1),
+                D3D_OK
+            );
+        });
+        assert_eq!(h.read_pixel(320, 280), GREEN, "base vertex {base}");
+    }
+}
+
+/// An overlapping inline layout keeps its positions even with a trailing color.
+#[test]
+fn overlapping_up_vertices_preserve_stride() {
+    let h = Harness::new();
+    let decl = h.create_vertex_declaration(&overlapping_declaration());
+    let vs = h.create_vertex_shader(&VS_POS_COLOR);
+    let ps = h.create_pixel_shader(&PS_CONST);
+    assert_eq!(h.set_vertex_declaration(&decl), D3D_OK);
+    assert_eq!(h.set_vertex_shader(&vs), D3D_OK);
+    assert_eq!(h.set_pixel_shader(&ps), D3D_OK);
+    assert_eq!(
+        h.set_pixel_shader_constant_f(0, &[0.0, 1.0, 0.0, 1.0]),
+        D3D_OK
+    );
+    let vertices = overlapping_vertices();
+    for primitive in [D3DPT_TRIANGLELIST, D3DPT_TRIANGLEFAN] {
+        render_stream_test(&h, |d| {
+            assert_eq!(d.draw_primitive_up(primitive, 1, &vertices[1..4]), D3D_OK);
+        });
+        assert_eq!(
+            h.read_pixel(320, 280),
+            GREEN,
+            "inline primitive {primitive}"
+        );
+        render_stream_test(&h, |d| {
+            assert_eq!(
+                d.draw_indexed_primitive_up(
+                    &DrawIndexedUpParams {
+                        prim: primitive,
+                        min_vertex_index: 1,
+                        num_vertices: 3,
+                        prim_count: 1,
+                        index_format: D3DFMT_INDEX16,
+                    },
+                    &[1u16, 2, 3],
+                    &vertices[..4]
+                ),
+                D3D_OK
+            );
+        });
+        assert_eq!(
+            h.read_pixel(320, 280),
+            GREEN,
+            "indexed inline primitive {primitive}"
+        );
+    }
+}
+
+/// The final inline attribute reads zero beyond the caller's vertex data.
+#[test]
+fn overlapping_up_tail_reads_zero_in_fixed_function_draws() {
+    let h = Harness::new();
+    let decl = h.create_vertex_declaration(&overlapping_declaration());
+    assert_eq!(h.set_vertex_declaration(&decl), D3D_OK);
+    assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), D3D_OK);
+    assert_eq!(
+        h.set_render_state(D3DRS_POINTSIZE, 8.0f32.to_bits()),
+        D3D_OK
+    );
+    h.select_diffuse_stage(0);
+    let vertices = overlapping_vertices();
+    for _ in 0..3 {
+        render_stream_test(&h, |d| {
+            assert_eq!(
+                d.draw_primitive_up(D3DPT_POINTLIST, 3, &vertices[1..4]),
+                D3D_OK
+            );
+        });
+        assert_eq!(
+            h.read_pixel(320, 120),
+            GREEN,
+            "first vertex reads next vertex's color"
+        );
+        assert_eq!(
+            h.read_pixel(480, 360),
+            GREEN,
+            "second vertex reads next vertex's color"
+        );
+        assert_eq!(
+            h.read_pixel(160, 360) & 0x00FF_FFFF,
+            0,
+            "final color is zero-filled"
+        );
+    }
+}
+
+/// Updating an overlapping attribute tail cannot corrupt an earlier queued draw.
+#[test]
+fn overlapping_bound_tail_upload_preserves_queued_fixed_function_draw() {
+    let h = Harness::new();
+    let decl = h.create_vertex_declaration(&overlapping_declaration());
+    assert_eq!(h.set_vertex_declaration(&decl), D3D_OK);
+    assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), D3D_OK);
+    h.select_diffuse_stage(0);
+    let vertices = overlapping_vertices();
+    let vb = h.create_vertex_buffer(16 + 5 * 36, 0, 0, D3DPOOL_DEFAULT);
+    vb.lock(16, 5 * 36, 0).write(&vertices);
+    assert_eq!(h.set_stream_source(0, &vb, 16, 36), D3D_OK);
+    render_stream_test(&h, |d| {
+        assert_eq!(d.draw_primitive(D3DPT_TRIANGLELIST, 1, 1), D3D_OK);
+        vb.lock(164, 4, 0).write(&[RED]);
+    });
+    assert_eq!(
+        h.read_pixel(320, 280),
+        GREEN,
+        "pending draw keeps the old tail"
     );
 }
 
@@ -508,6 +687,43 @@ fn indexed_draw_renders_every_instance() {
     );
     s.draw_indexed();
     s.assert_instances([true, true, true, true]);
+}
+
+/// Per-instance attributes can extend into the next instance's storage.
+#[test]
+fn overlapping_instance_stream_preserves_stride_and_step_rate() {
+    let s = InstancedScene::new();
+    let offsets = [
+        [-0.5f32, -0.5],
+        [0.5, -0.5],
+        [0.5, 0.5],
+        [-0.5, 0.5],
+        [0.0, 0.0],
+    ];
+    let vb =
+        s.h.create_vertex_buffer(40, D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT);
+    vb.lock(0, 0, 0).write(&offsets);
+    assert_eq!(s.h.set_stream_source(1, &vb, 0, 8), D3D_OK);
+    assert_eq!(
+        s.h.set_stream_source_freq(0, D3DSTREAMSOURCE_INDEXEDDATA | 4),
+        D3D_OK
+    );
+    for (rate, expected) in [
+        (1, [true, true, true, true]),
+        (2, [true, true, false, false]),
+    ] {
+        assert_eq!(
+            s.h.set_stream_source_freq(1, D3DSTREAMSOURCE_INSTANCEDATA | rate),
+            D3D_OK
+        );
+        render_stream_test(&s.h, |d| {
+            assert_eq!(
+                d.draw_indexed_primitive(D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2),
+                D3D_OK
+            );
+        });
+        s.assert_instances(expected);
+    }
 }
 
 /// The instance count follows stream 0's frequency: two instances draw two quads.

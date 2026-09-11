@@ -136,11 +136,28 @@ fn non_zero_stride_steps_per_frequency_word() {
 }
 
 #[test]
-fn layout_stride_widens_below_the_consumed_extent() {
+fn layout_stride_preserves_nonzero_application_stride() {
     assert_eq!(layout_stride(48, 36), 48);
     assert_eq!(layout_stride(36, 36), 36);
-    // A stride below the consumed extent is unencodable in Metal: widened.
-    assert_eq!(layout_stride(16, 28), 28);
+    assert_eq!(layout_stride(16, 28), 16);
+    assert_eq!(layout_stride(36, 44), 36);
     // Zero is the declaration extent for the inline (UP) path.
     assert_eq!(layout_stride(0, 28), 28);
+}
+
+#[test]
+fn stream_read_extent_covers_overlapping_tail_and_preserves_to_end() {
+    assert_eq!(cover_stream_extent(108, 36, 28), 108);
+    assert_eq!(cover_stream_extent(108, 36, 44), 116);
+    assert_eq!(cover_stream_extent(36, 36, 44), 44);
+    assert_eq!(cover_stream_extent(0, 36, 44), 0);
+    assert_eq!(cover_stream_extent(u32::MAX - 4, 36, 44), u32::MAX);
+    let mut range = crate::dirty_range::DirtyRange::empty();
+    let size = cover_stream_extent(108, 36, 44);
+    range.conjoin(52, size, 196);
+    assert!(
+        range.overlaps(164, 168),
+        "the last vertex's color is in use"
+    );
+    assert!(!range.overlaps(168, 172), "disjoint uploads stay disjoint");
 }

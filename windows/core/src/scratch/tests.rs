@@ -11,6 +11,21 @@ use super::*;
 const TEST_CHUNK: usize = 256;
 
 #[test]
+fn padded_alloc_zeroes_reused_storage_and_keeps_prior_pointers_stable() {
+    let mut arena = ScratchArena::with_chunk_size(TEST_CHUNK);
+    arena.alloc(&[0xAB; TEST_CHUNK]);
+    arena.clear();
+    let ptr = arena.alloc_padded(&[1, 2, 3, 4], 8);
+    for _ in 0..8 {
+        arena.alloc(&[0xCD; TEST_CHUNK]);
+    }
+    // SAFETY: the padded allocation covers 12 initialized bytes and the arena
+    // has not been cleared; subsequent allocations preserve its address.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, 12) };
+    assert_eq!(bytes, &[1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
 fn alloc_returns_stable_pointer_across_subsequent_allocs() {
     let mut arena = ScratchArena::with_chunk_size(TEST_CHUNK);
     let payloads: Vec<Vec<u8>> = (0u8..5)
