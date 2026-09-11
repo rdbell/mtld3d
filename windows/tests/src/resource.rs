@@ -975,6 +975,42 @@ pub struct VertexBuffer<'h> {
 }
 
 impl VertexBuffer<'_> {
+    /// Probe `Lock` with an output slot two bytes past a pointer-aligned address.
+    ///
+    /// Returns the HRESULT and whether the output is non-null. Successful locks are unlocked.
+    ///
+    /// # Panics
+    /// Panics if the output is aligned, Lock overwrites neighboring bytes, or Unlock fails.
+    #[must_use]
+    pub fn lock_unaligned_probe(&self, offset: u32, size: u32) -> (i32, bool) {
+        let mut storage = [usize::MAX; 3];
+        let out = storage
+            .as_mut_ptr()
+            .cast::<*mut c_void>()
+            .wrapping_byte_add(2);
+        assert!(!out.is_aligned(), "probe output must be unaligned");
+        // SAFETY: the vtable and buffer are live; `out` spans a writable pointer-sized
+        // region of `storage`. Lock accepts a byte-addressed output slot.
+        let hr = unsafe { (self.vtbl().lock)(self.ptr, offset, size, out, 0) };
+        // SAFETY: Lock initialized the pointer bytes in `storage`; unaligned access is required.
+        let data = unsafe { out.read_unaligned() };
+        let bytes: Vec<_> = storage.iter().flat_map(|word| word.to_ne_bytes()).collect();
+        assert!(bytes[..2].iter().all(|byte| *byte == 0xff));
+        assert!(
+            bytes[2 + size_of::<usize>()..]
+                .iter()
+                .all(|byte| *byte == 0xff)
+        );
+        if hr >= 0 {
+            // SAFETY: the live buffer was successfully locked above.
+            expect_ok(
+                unsafe { (self.vtbl().unlock)(self.ptr) },
+                "VertexBuffer Unlock",
+            );
+        }
+        (hr, !data.is_null())
+    }
+
     pub const fn from_raw(ptr: *mut c_void) -> Self {
         Self {
             ptr,
@@ -1152,6 +1188,42 @@ pub struct IndexBuffer<'h> {
 }
 
 impl IndexBuffer<'_> {
+    /// Probe `Lock` with an output slot two bytes past a pointer-aligned address.
+    ///
+    /// Returns the HRESULT and whether the output is non-null. Successful locks are unlocked.
+    ///
+    /// # Panics
+    /// Panics if the output is aligned, Lock overwrites neighboring bytes, or Unlock fails.
+    #[must_use]
+    pub fn lock_unaligned_probe(&self, offset: u32, size: u32) -> (i32, bool) {
+        let mut storage = [usize::MAX; 3];
+        let out = storage
+            .as_mut_ptr()
+            .cast::<*mut c_void>()
+            .wrapping_byte_add(2);
+        assert!(!out.is_aligned(), "probe output must be unaligned");
+        // SAFETY: the vtable and buffer are live; `out` spans a writable pointer-sized
+        // region of `storage`. Lock accepts a byte-addressed output slot.
+        let hr = unsafe { (self.vtbl().lock)(self.ptr, offset, size, out, 0) };
+        // SAFETY: Lock initialized the pointer bytes in `storage`; unaligned access is required.
+        let data = unsafe { out.read_unaligned() };
+        let bytes: Vec<_> = storage.iter().flat_map(|word| word.to_ne_bytes()).collect();
+        assert!(bytes[..2].iter().all(|byte| *byte == 0xff));
+        assert!(
+            bytes[2 + size_of::<usize>()..]
+                .iter()
+                .all(|byte| *byte == 0xff)
+        );
+        if hr >= 0 {
+            // SAFETY: the live buffer was successfully locked above.
+            expect_ok(
+                unsafe { (self.vtbl().unlock)(self.ptr) },
+                "IndexBuffer Unlock",
+            );
+        }
+        (hr, !data.is_null())
+    }
+
     pub const fn from_raw(ptr: *mut c_void) -> Self {
         Self {
             ptr,

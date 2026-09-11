@@ -153,6 +153,115 @@ fn dummy_draw() -> Command {
     Command::draw_primitives(mtld3d_shared::mtl::PrimitiveType::Triangle, 0, 3)
 }
 
+fn independent_pass_sequence() -> PassState {
+    let mut state = fresh();
+    state.clear_color(0, 0, 0, 1.0f32.to_bits());
+    state.clear_depth(1.0f32.to_bits());
+    state.emit_command(dummy_draw());
+    state.set_color_render_target(tex(0x3000), 640, 480, RT_FORMAT, RenderScale::IDENTITY);
+    state.set_depth_stencil_attachment(MetalHandle::NULL, (0, 0), false, false);
+    state.emit_command(dummy_draw());
+    state.set_color_render_target(backbuffer(), 640, 480, BB_FORMAT, RenderScale::IDENTITY);
+    state.set_depth_stencil_attachment(depth(), BB_SIZE, false, false);
+    state.emit_command(dummy_draw());
+    state.end_current_pass("test");
+    state
+}
+
+#[test]
+fn independent_draw_passes_merge_and_reset_implicit_encoder_state() {
+    let mut state = independent_pass_sequence();
+    assert_eq!(state.passes.len(), 3);
+    state.merge_independent_draw_passes();
+    assert_eq!(state.passes.len(), 2);
+    let commands = &state.passes[0].commands;
+    let draw_at: Vec<_> = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.cmd == CommandType::DrawPrimitives as u32)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(draw_at.len(), 2);
+    for kind in [
+        CommandType::SetBlendColor,
+        CommandType::SetDepthBias,
+        CommandType::SetStencilReference,
+    ] {
+        assert!(
+            commands[draw_at[0] + 1..draw_at[1]]
+                .iter()
+                .any(|c| c.cmd == kind as u32)
+        );
+    }
+}
+
+#[test]
+fn independent_merge_keeps_texture_read_write_dependencies() {
+    for vertex in [false, true] {
+        for read_by_middle in [false, true] {
+            for srgb in [false, true] {
+                let mut state = independent_pass_sequence();
+                let (index, texture) = if read_by_middle {
+                    (
+                        1,
+                        if srgb {
+                            backbuffer_srgb()
+                        } else {
+                            backbuffer()
+                        },
+                    )
+                } else {
+                    if srgb {
+                        state.register_srgb_twin(tex(0x3001), tex(0x3000));
+                    }
+                    (2, if srgb { tex(0x3001) } else { tex(0x3000) })
+                };
+                let command = if vertex {
+                    Command::set_vertex_texture(texture.raw(), 0)
+                } else {
+                    Command::set_fragment_texture(texture.raw(), 0)
+                };
+                state.passes[index].commands.insert(1, command);
+                state.merge_independent_draw_passes();
+                assert_eq!(
+                    state.passes.len(),
+                    3,
+                    "vertex={vertex} middle={read_by_middle} srgb={srgb}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_merge_stops_at_clears_queries_blits_and_shared_depth() {
+    for barrier in 0..6 {
+        let mut state = independent_pass_sequence();
+        match barrier {
+            0 => {
+                state.passes[2].color_load = ColorLoad::Clear {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 0,
+                }
+            }
+            1 => state.passes[2].depth_load = DepthLoad::Clear { value: 0 },
+            2 => state.passes[1].has_counting_visibility = true,
+            3 => state.passes[1]
+                .leading_blits
+                .push(BlitCommand::generate_mipmaps(tex(0x4000).raw())),
+            4 => state.passes[1].depth_texture = depth(),
+            5 => state.passes[2]
+                .commands
+                .insert(1, Command::set_fragment_texture(backbuffer().raw(), 0)),
+            _ => unreachable!(),
+        }
+        state.merge_independent_draw_passes();
+        assert_eq!(state.passes.len(), 3, "barrier={barrier}");
+    }
+}
+
 fn unpack_scissor(cmd: &Command) -> (u32, u32, u32, u32) {
     assert_eq!(cmd.cmd, CommandType::SetScissorRect as u32);
     let x = cmd.param_a;

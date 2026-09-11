@@ -562,23 +562,7 @@ pub extern "C" fn blit_texture_to_buffer_handler(args: *mut c_void) -> i32 {
     let Some(params) = (unsafe { InPtr::<BlitTextureToBufferParams>::opt(args.cast()) }) else {
         return -1;
     };
-    let blit_args = metal::BlitArgs {
-        queue_handle: params.queue_handle,
-        device_handle: params.device_handle,
-        tex_handle: params.tex_handle,
-        dst_ptr: params.dst_ptr,
-        dst_len: params.dst_len,
-        mip_level: params.mip_level,
-        slice: params.slice,
-        origin_x: params.origin_x,
-        origin_y: params.origin_y,
-        width: params.width,
-        height: params.height,
-        bytes_per_row: params.bytes_per_row,
-        source_width: params.source_width,
-        source_height: params.source_height,
-        block_height: params.block_height,
-    };
+    let blit_args = metal::BlitArgs::from(&*params);
     if metal::blit_texture_to_buffer(&blit_args) {
         STATUS_SUCCESS
     } else {

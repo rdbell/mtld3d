@@ -174,7 +174,7 @@ impl<T: Copy> ValueIn<'_, T> {
 
 /// Null-guarded FFI out-param. `write` consumes `self`.
 ///
-/// Construction is `unsafe` (the caller asserts writeability and alignment);
+/// Construction is `unsafe` (the caller asserts writeability and lifetime);
 /// `write` is safe because the invariant is type-encoded.
 pub struct OutPtr<'a, T>(NonNull<T>, PhantomData<&'a mut T>);
 
@@ -183,8 +183,8 @@ impl<T> OutPtr<'_, T> {
     ///
     /// # Safety
     ///
-    /// Caller asserts that any non-null `out` is a writable, properly-aligned
-    /// `T*` valid for the call frame (the D3D9 ABI for typed out-params).
+    /// Caller asserts that any non-null `out` spans writable storage for a `T`
+    /// valid for the call frame. The storage need not be aligned to `T`.
     #[must_use]
     pub const unsafe fn opt(out: *mut T) -> Option<Self> {
         match NonNull::new(out) {
@@ -196,7 +196,7 @@ impl<T> OutPtr<'_, T> {
     /// Consume `self` and write `val` through the pointer.
     pub const fn write(self, val: T) {
         // SAFETY: invariant carried from construction.
-        unsafe { self.0.as_ptr().write(val) };
+        unsafe { self.0.as_ptr().write_unaligned(val) };
     }
 
     /// One-shot null-guarded write. Convenience for the `opt + write` pair.

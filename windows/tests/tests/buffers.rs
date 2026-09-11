@@ -52,6 +52,25 @@ fn arm_diffuse(h: &Harness) {
 }
 
 #[test]
+fn vertex_buffer_lock_accepts_unaligned_output() {
+    let h = Harness::new();
+    let vb = h.create_vertex_buffer(stride() * 3, D3DUSAGE_DYNAMIC, FVF, D3DPOOL_DEFAULT);
+    assert_eq!(vb.lock_unaligned_probe(0, 0), (D3D_OK, true));
+    assert_eq!(
+        vb.lock_unaligned_probe(stride() * 3 + 1, 0),
+        (D3DERR_INVALIDCALL, false)
+    );
+}
+
+#[test]
+fn index_buffer_lock_accepts_unaligned_output() {
+    let h = Harness::new();
+    let ib = h.create_index_buffer(6, D3DUSAGE_DYNAMIC, D3DFMT_INDEX16, D3DPOOL_DEFAULT);
+    assert_eq!(ib.lock_unaligned_probe(0, 0), (D3D_OK, true));
+    assert_eq!(ib.lock_unaligned_probe(7, 0), (D3DERR_INVALIDCALL, false));
+}
+
+#[test]
 fn draw_primitive_from_vertex_buffer() {
     let h = Harness::new();
     let tri = solid_triangle(GREEN);

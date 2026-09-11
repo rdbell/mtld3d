@@ -138,6 +138,20 @@ pub struct Mtld3dConfig {
     /// fence every loading-screen upload batch that way and the wait costs
     /// seconds per load. File key: `query.flushImmediate`.
     pub query_flush_immediate: bool,
+    /// Submit a continuation after this many draws so encoding can overlap the API thread.
+    ///
+    /// Zero keeps whole-frame batching. A continuation preserves colour and
+    /// depth and does not present. Small values add render-pass store/load
+    /// traffic. Default: `0`. File key: `render.submitDraws`.
+    pub render_submit_draws: u32,
+    /// Merge independent single-sample passes. Experimental, default false.
+    ///
+    /// File key: `render.mergePasses`.
+    pub render_merge_passes: bool,
+    /// Experimental render + readback in one synchronous command buffer.
+    pub render_fuse_readback: bool,
+    /// Diagnostic: alternate fused readback every eight seconds.
+    pub render_fuse_readback_ab: bool,
     /// A newly bound same-size depth-stencil texture inherits the previous one's contents.
     ///
     /// D3D9-era drivers commonly backed all equal-size depth-stencil
@@ -309,6 +323,10 @@ impl Default for Mtld3dConfig {
             bytecode_dump_dir: String::new(),
             skip_shaders: Vec::new(),
             query_flush_immediate: false,
+            render_submit_draws: 0,
+            render_merge_passes: false,
+            render_fuse_readback: false,
+            render_fuse_readback_ab: false,
             depth_alias_same_size: false,
             buffer_ignore_lock_bounds: false,
             vbib_retention_cap_bytes: 512 * 1024 * 1024,
@@ -455,6 +473,12 @@ pub fn log_options(cfg: &Mtld3dConfig) {
     );
     info!(
         target: crate::LOG_TARGET,
+        "config: render.submitDraws = {}", cfg.render_submit_draws
+    );
+    info!(target: crate::LOG_TARGET, "config: render.fuseReadback = {}", cfg.render_fuse_readback);
+    info!(target: crate::LOG_TARGET, "config: render.mergePasses = {}", cfg.render_merge_passes);
+    info!(
+        target: crate::LOG_TARGET,
         "config: depth.aliasSameSize = {}", cfg.depth_alias_same_size
     );
     info!(
@@ -536,6 +560,14 @@ fn apply(cfg: &mut Mtld3dConfig, source: &str, key: &str, value: &str) {
         "debug.bytecodeDumpDir" => value.clone_into(&mut cfg.bytecode_dump_dir),
         "debug.skipShaders" => cfg.skip_shaders = parse_hex_list(value),
         "query.flushImmediate" => assign_bool(source, key, value, &mut cfg.query_flush_immediate),
+        "render.submitDraws" => match value.parse::<u32>() {
+            Ok(draws) => cfg.render_submit_draws = draws,
+            Err(_) => log::warn!(target: crate::LOG_TARGET,
+                "{source}: invalid render.submitDraws {value:?}, expected a nonnegative integer"),
+        },
+        "render.fuseReadbackAB" => assign_bool(source, key, value, &mut cfg.render_fuse_readback_ab),
+        "render.fuseReadback" => assign_bool(source, key, value, &mut cfg.render_fuse_readback),
+        "render.mergePasses" => assign_bool(source, key, value, &mut cfg.render_merge_passes),
         "depth.aliasSameSize" => assign_bool(source, key, value, &mut cfg.depth_alias_same_size),
         "buffer.ignoreLockBounds" => {
             assign_bool(source, key, value, &mut cfg.buffer_ignore_lock_bounds);

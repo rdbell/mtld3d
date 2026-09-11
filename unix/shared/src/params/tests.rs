@@ -110,8 +110,10 @@ fn frame_param_layouts_match_wow64() {
     //   + 8 submit_seq + 8 coherent_seq_ptr + 8 upload_coherent_seq_ptr
     //   + 8 failed_submit_seq_ptr
     //   + 8 drawable_wait_ns + 8 present_view
-    //   = 104
-    assert_eq!(core::mem::size_of::<SubmitFrameParams>(), 104);
+    //   + 8 readback_params_ptr = 112
+    assert_eq!(core::mem::size_of::<SubmitFrameParams>(), 112);
+
+    assert_eq!(core::mem::offset_of!(SubmitFrameParams, readback_params_ptr), 104);
 
     // CreateTexturesBatchParams:
     //   8 device_handle + 4 count + 4 _pad0 + 8 descs_ptr + 8 handles_out_ptr

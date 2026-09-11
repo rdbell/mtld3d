@@ -294,7 +294,16 @@ impl core::fmt::Display for BlitSite {
 /// with its own attachments and load actions, optionally blits the
 /// backbuffer to the drawable, and commits.
 pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
+    // Sample adjacent submissions: readback workloads can split every
+    // application frame in two, so a single even sequence is biased.
+    let timer = (params.submit_seq % 128 < 2
+        && log::log_enabled!(target: "mtld3d::gpu_time", log::Level::Trace))
+    .then(std::time::Instant::now);
     params.drawable_wait_ns = 0;
+    if params.readback_params_ptr != 0 && !params.present_layer.is_null() {
+        error!(target: LOG_TARGET, "submit_frame: readback requires no presentation");
+        return false;
+    }
     mtld3d_shared::crumb!("submit:enter", params.queue_handle.raw(), params.pass_count);
     mtld3d_shared::crumb!("submit:queueret", params.queue_handle.raw());
     let Some(queue) = params.queue_handle.into_retained() else {
@@ -368,6 +377,15 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             if !encode_pass(&cmd_buf, pass, pass_idx) {
                 return false;
             }
+        }
+    }
+
+    if params.readback_params_ptr != 0 {
+        // SAFETY: synchronous PE FrameData owns these params until this thunk
+        // returns. The API thread holds the destination pages for that period.
+        let readback = unsafe { &*(params.readback_params_ptr as *const mtld3d_shared::BlitTextureToBufferParams) };
+        if !encode_readback(&cmd_buf, &BlitArgs::from(readback)) {
+            return false;
         }
     }
 
@@ -592,6 +610,7 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             .expect("PE wire pointer fits host address space (unix is 64-bit)");
         let seq = params.submit_seq;
         let failed_seq_ptr = params.failed_submit_seq_ptr;
+        let sample_gpu_time = timer.is_some();
         let handler = RcBlock::new(
             move |cb_ptr: core::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
                 // Tripwire: a command buffer the GPU rejected discards every
@@ -606,6 +625,12 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                 // SAFETY: Metal invokes the block with the completed command
                 // buffer; the pointer is valid for the handler's duration.
                 let cb = unsafe { cb_ptr.as_ref() };
+                if sample_gpu_time {
+                    log::trace!(target: "mtld3d::gpu_time",
+                        "submit_seq={seq} gpu_ms={:.3} kernel_ms={:.3}",
+                        (cb.GPUEndTime() - cb.GPUStartTime()).max(0.0) * 1000.0,
+                        (cb.kernelEndTime() - cb.kernelStartTime()).max(0.0) * 1000.0);
+                }
                 // The failure is recorded before the retirement bump below:
                 // both stores are `Release`, so a PE-side `Acquire` load of
                 // `coherent_seq` that observes this seq observes the failure
@@ -644,7 +669,17 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
 
     mtld3d_shared::crumb!("submit:commit");
     cmd_buf.commit();
+    if let Some(start) = timer {
+        log::trace!(target: "mtld3d::gpu_time",
+            "submit_seq={} no_present={} passes={} cpu_encode_commit_ms={:.3}",
+            params.submit_seq, params.present_layer.is_null(), params.pass_count,
+            start.elapsed().as_secs_f64() * 1000.0);
+    }
     mtld3d_shared::crumb!("submit:done");
+    if params.readback_params_ptr != 0 {
+        cmd_buf.waitUntilCompleted();
+        return cmd_buf.status() == MTLCommandBufferStatus::Completed;
+    }
     true
 }
 
@@ -2859,13 +2894,60 @@ fn encode_readback_resolve(
 /// on the same `queue_handle` is guaranteed by Metal's in-order queue
 /// execution — this command buffer will not start until the previously
 /// committed render command buffer has finished.
-pub fn blit_texture_to_buffer(args: &BlitArgs) -> bool {
-    use core::{ffi::c_void, ptr::NonNull};
+impl From<&mtld3d_shared::BlitTextureToBufferParams> for BlitArgs {
+    fn from(params: &mtld3d_shared::BlitTextureToBufferParams) -> Self {
+        Self {
+            queue_handle: params.queue_handle,
+            device_handle: params.device_handle,
+            tex_handle: params.tex_handle,
+            dst_ptr: params.dst_ptr,
+            dst_len: params.dst_len,
+            mip_level: params.mip_level,
+            slice: params.slice,
+            origin_x: params.origin_x,
+            origin_y: params.origin_y,
+            width: params.width,
+            height: params.height,
+            bytes_per_row: params.bytes_per_row,
+            source_width: params.source_width,
+            source_height: params.source_height,
+            block_height: params.block_height,
+        }
+    }
+}
 
+pub fn blit_texture_to_buffer(args: &BlitArgs) -> bool {
+    let timer = log::log_enabled!(target: "mtld3d::readback", log::Level::Trace)
+        .then(std::time::Instant::now);
+    let Some(queue) = args.queue_handle.into_retained() else {
+        return false;
+    };
+    let Some(cmd_buf) = queue.commandBuffer() else {
+        return false;
+    };
+    if !encode_readback(&cmd_buf, args) {
+        return false;
+    }
+    let encode_elapsed = timer.map(|start| start.elapsed());
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    if let (Some(start), Some(encode)) = (timer, encode_elapsed) {
+        log::trace!(target: "mtld3d::readback",
+            "metal_blit {}x{} encode_ms={:.3} wait_ms={:.3}",
+            args.width, args.height, encode.as_secs_f64() * 1000.0,
+            start.elapsed().saturating_sub(encode).as_secs_f64() * 1000.0);
+    }
+    cmd_buf.status() == MTLCommandBufferStatus::Completed
+}
+
+/// Append to a retained-resource command buffer. The caller must commit and
+/// wait before releasing or accessing the PE destination pages.
+fn encode_readback(cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>, args: &BlitArgs) -> bool {
+    use core::{ffi::c_void, ptr::NonNull};
     let to_usize =
         |v: u64| usize::try_from(v).expect("PE wire u64 fits unix host usize (unix is 64-bit)");
     let BlitArgs {
-        queue_handle,
+        queue_handle: _,
         device_handle,
         tex_handle,
         dst_ptr,
@@ -2886,10 +2968,6 @@ pub fn blit_texture_to_buffer(args: &BlitArgs) -> bool {
         error!(target: LOG_TARGET, "blit_texture_to_buffer: invalid args");
         return false;
     }
-    let Some(queue) = queue_handle.into_retained() else {
-        error!(target: LOG_TARGET, "blit_texture_to_buffer: queue retain failed");
-        return false;
-    };
     let Some(device) = device_handle.into_retained() else {
         error!(target: LOG_TARGET, "blit_texture_to_buffer: device retain failed");
         return false;
@@ -2928,20 +3006,12 @@ pub fn blit_texture_to_buffer(args: &BlitArgs) -> bool {
         dst_buffer.setLabel(Some(&label));
     }
 
-    let Some(cmd_buf) = queue.commandBuffer() else {
-        error!(target: LOG_TARGET, "blit_texture_to_buffer: commandBuffer() nil");
-        return false;
-    };
-    {
-        let label = objc2_foundation::NSString::from_str("mtld3d-readback");
-        cmd_buf.setLabel(Some(&label));
-    }
     // Under `render.scale` the source is rasterized smaller than the resolution
     // the caller's coordinates are in, so resolve it up first, on this same
     // command buffer and ahead of the blit encoder: the resolve opens a render
     // pass of its own and Metal allows one encoder at a time. Sizes match at
     // the default scale and this is skipped.
-    let source = resolve_readback_source(&cmd_buf, &device, &texture, source_width, source_height);
+    let source = resolve_readback_source(cmd_buf, &device, &texture, source_width, source_height);
     let texture = source.as_deref().unwrap_or(&*texture);
 
     let bytes_per_image = (bytes_per_row as usize) * (height as usize);
@@ -3024,10 +3094,6 @@ pub fn blit_texture_to_buffer(args: &BlitArgs) -> bool {
     }
 
     blit.endEncoding();
-    cmd_buf.commit();
-    cmd_buf.waitUntilCompleted();
-    // dst_buffer drops here — Metal wrapper released, caller's memory
-    // untouched (deallocator was None).
     true
 }
 

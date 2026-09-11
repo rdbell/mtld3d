@@ -2,12 +2,16 @@
 
 use mtld3d_tests::{Harness, LitVertex, PosVertex, SpecularVertex, Vertex};
 use mtld3d_types::{
-    D3DCMP_GREATER, D3DCOLORVALUE, D3DFVF_DIFFUSE, D3DFVF_NORMAL, D3DFVF_SPECULAR, D3DFVF_XYZ,
-    D3DLIGHT_DIRECTIONAL, D3DLIGHT_POINT, D3DLIGHT_SPOT, D3DLIGHT9, D3DMATERIAL9, D3DMCS_MATERIAL,
-    D3DPT_TRIANGLELIST, D3DRS_ALPHAFUNC, D3DRS_ALPHAREF, D3DRS_ALPHATESTENABLE, D3DRS_AMBIENT,
-    D3DRS_AMBIENTMATERIALSOURCE, D3DRS_EMISSIVEMATERIALSOURCE, D3DRS_LIGHTING, D3DRS_LOCALVIEWER,
-    D3DRS_SPECULARENABLE, D3DTA_ALPHAREPLICATE, D3DTA_DIFFUSE, D3DTA_SPECULAR, D3DTS_PROJECTION,
-    D3DTS_TEXTURE0, D3DTS_VIEW, D3DTS_WORLD, D3DTSS_COLORARG1, D3DVECTOR,
+    D3DCMP_GREATER, D3DCOLORVALUE, D3DDECL_END, D3DDECLMETHOD_DEFAULT, D3DDECLTYPE_D3DCOLOR,
+    D3DDECLTYPE_FLOAT3, D3DDECLUSAGE_COLOR, D3DDECLUSAGE_NORMAL, D3DDECLUSAGE_POSITION,
+    D3DFVF_DIFFUSE, D3DFVF_NORMAL, D3DFVF_SPECULAR, D3DFVF_XYZ, D3DLIGHT_DIRECTIONAL,
+    D3DLIGHT_POINT, D3DLIGHT_SPOT, D3DLIGHT9, D3DMATERIAL9, D3DMCS_COLOR1, D3DMCS_COLOR2,
+    D3DMCS_MATERIAL, D3DPT_TRIANGLELIST, D3DRS_ALPHAFUNC, D3DRS_ALPHAREF, D3DRS_ALPHATESTENABLE,
+    D3DRS_AMBIENT, D3DRS_AMBIENTMATERIALSOURCE, D3DRS_COLORVERTEX, D3DRS_DIFFUSEMATERIALSOURCE,
+    D3DRS_EMISSIVEMATERIALSOURCE, D3DRS_LIGHTING, D3DRS_LOCALVIEWER, D3DRS_SPECULARENABLE,
+    D3DRS_SPECULARMATERIALSOURCE, D3DTA_ALPHAREPLICATE, D3DTA_DIFFUSE, D3DTA_SPECULAR,
+    D3DTS_PROJECTION, D3DTS_TEXTURE0, D3DTS_VIEW, D3DTS_WORLD, D3DTSS_COLORARG1, D3DVECTOR,
+    D3DVERTEXELEMENT9,
 };
 
 #[rustfmt::skip]
@@ -19,6 +23,171 @@ const IDENTITY: [f32; 16] = [
 ];
 
 const BLUE: u32 = 0xFF00_00FF;
+
+#[test]
+fn shader_aliases_preserve_active_texture_arguments_across_devices() {
+    use mtld3d_types::{
+        D3DRS_TEXTUREFACTOR, D3DTA_CURRENT, D3DTA_TFACTOR, D3DTOP_SELECTARG1, D3DTOP_SELECTARG2,
+        D3DTSS_COLORARG2, D3DTSS_COLOROP,
+    };
+
+    // ARG2 is ignored by SELECTARG1. Change it to create distinct state keys with identical
+    // MSL, then make it active and check that genuinely different code is still compiled.
+    // Keep both windows alive: destroying a harness posts WM_QUIT to the thread. Each device
+    // must own its own libraries, and shutdown must release each shared handle only once.
+    let devices = [Harness::new(), Harness::new()];
+    for h in &devices {
+        assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), 0);
+        assert_eq!(h.set_render_state(D3DRS_TEXTUREFACTOR, 0xFFFF_0000), 0);
+        assert_eq!(h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE), 0);
+        h.select_diffuse_stage(0);
+        let tri = solid_triangle(0xFF00_FF00);
+        for ignored in [D3DTA_DIFFUSE, D3DTA_CURRENT, D3DTA_TFACTOR] {
+            assert_eq!(h.set_texture_stage_state(0, D3DTSS_COLORARG2, ignored), 0);
+            h.render_once(BLUE, |d| {
+                assert_eq!(d.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &tri), 0);
+            });
+            assert_eq!(h.read_pixel(320, 280), 0xFF00_FF00);
+        }
+        for (op, expected) in [
+            (D3DTOP_SELECTARG2, 0xFFFF_0000),
+            (D3DTOP_SELECTARG1, 0xFF00_FF00),
+        ] {
+            assert_eq!(h.set_texture_stage_state(0, D3DTSS_COLOROP, op), 0);
+            h.render_once(BLUE, |d| {
+                assert_eq!(d.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &tri), 0);
+            });
+            assert_eq!(h.read_pixel(320, 280), expected);
+        }
+    }
+}
+
+fn lit_color_declaration(h: &Harness, declare_colors: bool) {
+    let mut elements = vec![
+        D3DVERTEXELEMENT9 {
+            stream: 0,
+            offset: 0,
+            type_: D3DDECLTYPE_FLOAT3,
+            method: D3DDECLMETHOD_DEFAULT,
+            usage: D3DDECLUSAGE_POSITION,
+            usage_index: 0,
+        },
+        D3DVERTEXELEMENT9 {
+            stream: 0,
+            offset: 12,
+            type_: D3DDECLTYPE_FLOAT3,
+            method: D3DDECLMETHOD_DEFAULT,
+            usage: D3DDECLUSAGE_NORMAL,
+            usage_index: 0,
+        },
+    ];
+    if declare_colors {
+        for usage_index in 0..2 {
+            elements.push(D3DVERTEXELEMENT9 {
+                stream: u16::from(usage_index) + 1,
+                offset: 0,
+                type_: D3DDECLTYPE_D3DCOLOR,
+                method: D3DDECLMETHOD_DEFAULT,
+                usage: D3DDECLUSAGE_COLOR,
+                usage_index,
+            });
+        }
+    }
+    elements.push(D3DDECL_END);
+    let decl = h.create_vertex_declaration(&elements);
+    assert_eq!(h.set_vertex_declaration(&decl), 0);
+    assert_eq!(h.set_stream_source_null(1, 0, 0), 0);
+    assert_eq!(h.set_stream_source_null(2, 0, 0), 0);
+}
+
+fn check_declared_material_sources(declare_colors: bool) {
+    let h = Harness::new();
+    lit_color_declaration(&h, declare_colors);
+    for state in [D3DTS_WORLD, D3DTS_VIEW, D3DTS_PROJECTION] {
+        assert_eq!(h.set_transform(state, &IDENTITY), 0);
+    }
+    for (state, value) in [
+        (D3DRS_LIGHTING, 1),
+        (D3DRS_COLORVERTEX, 1),
+        (D3DRS_LOCALVIEWER, 0),
+        (D3DRS_SPECULARENABLE, 1),
+        (D3DRS_AMBIENT, 0xFFFF_FFFF),
+    ] {
+        assert_eq!(h.set_render_state(state, value), 0);
+    }
+    h.select_diffuse_stage(0);
+    let white = D3DCOLORVALUE {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    let light = D3DLIGHT9 {
+        type_: D3DLIGHT_DIRECTIONAL,
+        diffuse: white,
+        specular: white,
+        direction: D3DVECTOR {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+        ..D3DLIGHT9::default()
+    };
+    assert_eq!(h.set_light(0, &light), 0);
+    assert_eq!(h.light_enable(0, true), 0);
+    let tri = [(0.0, 0.5), (0.5, -0.5), (-0.5, -0.5)].map(|(x, y)| LitVertex {
+        x,
+        y,
+        z: 0.5,
+        nx: 0.0,
+        ny: 0.0,
+        nz: -1.0,
+    });
+    let material_sources = [
+        D3DRS_DIFFUSEMATERIALSOURCE,
+        D3DRS_AMBIENTMATERIALSOURCE,
+        D3DRS_SPECULARMATERIALSOURCE,
+        D3DRS_EMISSIVEMATERIALSOURCE,
+    ];
+    for source in [D3DMCS_COLOR1, D3DMCS_COLOR2] {
+        for state in material_sources {
+            assert_eq!(h.set_render_state(state, source), 0);
+        }
+        for component in 0..4 {
+            let mut material = D3DMATERIAL9::default();
+            material.diffuse.a = 1.0;
+            material.power = 1.0;
+            let selected = match component {
+                0 => &mut material.diffuse,
+                1 => &mut material.ambient,
+                2 => &mut material.specular,
+                _ => &mut material.emissive,
+            };
+            selected.r = 1.0;
+            assert_eq!(h.set_material(&material), 0);
+            h.render_once(BLUE, |d| {
+                assert_eq!(d.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &tri), 0);
+            });
+            let expected = if declare_colors { 0 } else { 0xFFFF_0000 };
+            assert_eq!(h.read_pixel(10, 10), BLUE, "corner remains clear");
+            assert_eq!(
+                h.read_pixel(320, 280),
+                expected,
+                "source {source}, material component {component}, declared {declare_colors}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lit_decl_omitted_colors_fall_back_to_material() {
+    check_declared_material_sources(false);
+}
+
+#[test]
+fn lit_decl_unbound_colors_read_zero() {
+    check_declared_material_sources(true);
+}
 
 const fn solid_triangle(color: u32) -> [Vertex; 3] {
     [

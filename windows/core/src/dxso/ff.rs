@@ -106,12 +106,6 @@ bitflags::bitflags! {
         // Bit 10 was DIFFUSE_DECLARED_UNBOUND: a COLOR0 on a stream nothing
         // feeds now reaches the shader as zeros through the stream's
         // constant layout, so the plain HAS_COLOR0 path covers it.
-        /// The vertex format came from `SetVertexDeclaration`, not `SetFVF`.
-        ///
-        /// A COLORVERTEX material source pointing at a vertex colour the
-        /// declaration omits reads 0, whereas FVF falls back to the material
-        /// colour.
-        const USES_VERTEX_DECL = 1 << 11;
         /// `D3DRS_NORMALIZENORMALS` is enabled.
         ///
         /// The FF VS then renormalizes the eye-space normal after the
@@ -243,11 +237,6 @@ impl FfVsKey {
     #[must_use]
     pub const fn has_color1(&self) -> bool {
         self.flags.contains(FfVsFlags::HAS_COLOR1)
-    }
-    #[inline]
-    #[must_use]
-    pub const fn uses_vertex_decl(&self) -> bool {
-        self.flags.contains(FfVsFlags::USES_VERTEX_DECL)
     }
     #[inline]
     #[must_use]
@@ -1004,7 +993,6 @@ fn emit_vs(out: &mut String, vs: &FfVsKey, entry: &str) {
         mat_flags.set(MatColorFlags::COLOR_VERTEX, vs.color_vertex());
         mat_flags.set(MatColorFlags::HAS_COLOR0, vs.has_color0());
         mat_flags.set(MatColorFlags::HAS_COLOR1, vs.has_color1());
-        mat_flags.set(MatColorFlags::USES_DECL, vs.uses_vertex_decl());
         let mat_diffuse = resolve_mat(vs.diffuse_source, 10, mat_flags);
         let mat_ambient = resolve_mat(vs.ambient_source, 11, mat_flags);
         let mat_specular = resolve_mat(vs.specular_source, 12, mat_flags);
@@ -1365,11 +1353,6 @@ bitflags::bitflags! {
         const HAS_COLOR0 = 1 << 1;
         /// The vertex carries a `COLOR1` (specular) channel.
         const HAS_COLOR1 = 1 << 2;
-        /// The draw uses a vertex declaration (not a legacy FVF).
-        ///
-        /// An absent colour reads 0 rather than falling back to the material
-        /// constant.
-        const USES_DECL = 1 << 3;
     }
 }
 
@@ -1378,6 +1361,8 @@ bitflags::bitflags! {
 /// The field (0 = `MCS_MATERIAL`, 1 = `MCS_COLOR1`, 2 = `MCS_COLOR2`) selects
 /// the expression that feeds the FF lighting math. When `D3DRS_COLORVERTEX` is
 /// false, the override is ignored and the material constant is always used.
+/// An omitted colour semantic also falls back to the material; a declared
+/// colour on an unbound stream reaches the shader input as zero instead.
 fn resolve_mat(source: u8, mat_slot: u32, flags: MatColorFlags) -> String {
     if flags.contains(MatColorFlags::COLOR_VERTEX) {
         if source == 1 && flags.contains(MatColorFlags::HAS_COLOR0) {
@@ -1385,12 +1370,6 @@ fn resolve_mat(source: u8, mat_slot: u32, flags: MatColorFlags) -> String {
         }
         if source == 2 && flags.contains(MatColorFlags::HAS_COLOR1) {
             return "in.v3".to_string();
-        }
-        if (source == 1 || source == 2) && flags.contains(MatColorFlags::USES_DECL) {
-            // A vertex declaration that omits the requested COLOR reads 0 — only
-            // the legacy FVF path falls back to the material colour for an
-            // absent vertex colour source.
-            return "float4(0.0)".to_string();
         }
         if source > 2 {
             mtld3d_shared::log_once_warn!(target: super::LOG_TARGET, "dxso FF: unknown material source {source} → MCS_MATERIAL");

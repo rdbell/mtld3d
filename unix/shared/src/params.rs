@@ -48,7 +48,7 @@ const _: () = {
     assert!(core::mem::size_of::<AttachMetalLayerParams>() == 88);
     assert!(core::mem::size_of::<CreateBackbufferParams>() == 64);
     assert!(core::mem::size_of::<DestroyCommandQueueParams>() == 48);
-    assert!(core::mem::size_of::<SubmitFrameParams>() == 104);
+    assert!(core::mem::size_of::<SubmitFrameParams>() == 112);
     assert!(core::mem::size_of::<PassDescriptor>() == 216);
 };
 
@@ -897,6 +897,10 @@ pub struct SubmitFrameParams {
     /// frame). Used only on the HDR branch, gated unix-side by
     /// `HDR_BOOTSTRAP_PEAK_BITS > 1.0`.
     pub present_view: MetalHandle<NSViewKind>, // in
+    /// Optional BlitTextureToBufferParams, owned by the synchronous FrameData.
+    /// Nonzero requires no presentation. SubmitFrame waits for GPU completion
+    /// before returning, so the destination pages remain borrowed until then.
+    pub readback_params_ptr: u64,
 }
 
 impl Thunk for SubmitFrameParams {

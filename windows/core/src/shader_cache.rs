@@ -49,6 +49,9 @@ use xxhash_rust::xxh3::Xxh3;
 
 use crate::shader_compile_stats::CompileBucket;
 
+mod libraries;
+pub use libraries::CompiledShaders;
+
 /// Bumped on any of: DXSO emitter changes, FF emitter changes, hash function, on-disk format.
 ///
 /// A cache file with a different schema is wiped and rebuilt from
@@ -269,7 +272,10 @@ use crate::shader_compile_stats::CompileBucket;
 /// bound to a volume or cube texture emits `texture3d<float>` /
 /// `texturecube<float>` and a `.xyz` coordinate whatever its `dcl_<dim>` said,
 /// which is new MSL and a new programmable-VS disk-key input.
-pub const SHADER_CACHE_SCHEMA_VERSION: u32 = 67;
+///
+/// `68` falls back to material constants for omitted vertex colour semantics
+/// in fixed-function lighting and removes the declaration-origin key bit.
+pub const SHADER_CACHE_SCHEMA_VERSION: u32 = 68;
 
 /// File magic.
 ///

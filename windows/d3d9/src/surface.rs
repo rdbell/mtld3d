@@ -2745,7 +2745,26 @@ fn refresh_lockable_rt_staging(inner: &mut SurfaceInner) {
 /// read-back BEFORE the flush so the store-action optimiser (Rule D) keeps the
 /// rendered content. A blit failure leaves the staging as-is (the zero-init /
 /// prior content) — the lock still succeeds.
+/// Diagnostic within-run comparison, default off. Transition frames must be
+/// excluded by the report because a mode can change between reads in a frame.
+fn fused_readback_enabled() -> bool {
+    if !crate::config::CONFIG.render_fuse_readback_ab {
+        return crate::config::CONFIG.render_fuse_readback;
+    }
+    use std::sync::{OnceLock, atomic::{AtomicU64, Ordering}};
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+    let block = START.get_or_init(std::time::Instant::now).elapsed().as_secs() / 8;
+    let enabled = block % 2 != 0;
+    if LAST.swap(block, Ordering::Relaxed) != block {
+        log::info!(target: "mtld3d::readback", "readback_ab block={block} fused={enabled}");
+    }
+    enabled
+}
+
 fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
+    let timer = log::log_enabled!(target: "mtld3d::readback", log::Level::Trace)
+        .then(std::time::Instant::now);
     let (width, height) = (inner.standalone_width, inner.standalone_height);
     let tex_handle = inner.live_color_handle();
     if bpp == 0 || width == 0 || height == 0 || tex_handle.is_null() {
@@ -2797,7 +2816,6 @@ fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
     // reads it right after. Mark it read-back BEFORE the flush so
     // `finalize_store_actions` keeps the rendered content.
     device_inner.push_op(Box::new(move |enc| enc.note_color_read_back(tex_handle)));
-    device_inner.flush_current_frame_blocking();
     let mut params = BlitTextureToBufferParams {
         queue_handle: device_inner.queue_handle(),
         device_handle: device_inner.device_handle(),
@@ -2821,7 +2839,21 @@ fn lockable_rt_readback_fill(inner: &mut SurfaceInner, bpp: u32) {
         // uncompressed and a block row is a pixel row.
         block_height: 1,
     };
-    let status = unix_call(&mut params);
+    let fused = fused_readback_enabled();
+    let (status, flush_elapsed) = if fused {
+        let status = device_inner.flush_with_readback(params);
+        (status, timer.map(|start| start.elapsed()))
+    } else {
+        device_inner.flush_current_frame_blocking();
+        let flush_elapsed = timer.map(|start| start.elapsed());
+        (unix_call(&mut params), flush_elapsed)
+    };
+    if let (Some(start), Some(flush)) = (timer, flush_elapsed) {
+        log::trace!(target: "mtld3d::readback",
+            "lockable_rt {width}x{height} fused={fused} flush_ms={:.3} read_ms={:.3} status={status:#x}",
+            flush.as_secs_f64() * 1000.0,
+            start.elapsed().saturating_sub(flush).as_secs_f64() * 1000.0);
+    }
     if status != 0 {
         mtld3d_shared::log_once_warn!(target: crate::LOG_TARGET,
             "lockable RT LockRect read-back: BlitTextureToBuffer failed status={status:#x} (staging left as-is)"

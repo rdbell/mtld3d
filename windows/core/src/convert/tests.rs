@@ -727,7 +727,7 @@ fn resolve_attrs_drops_streams_past_the_slot_table() {
     let resolved = resolve_attrs_for_ff(&elems);
     assert_eq!(resolved.attrs.len(), 1);
     assert_eq!(resolved.used_streams, 0b1);
-    let layout = ff_vs_layout_from_elements(&elems, true);
+    let layout = ff_vs_layout_from_elements(&elems);
     assert!(
         !layout.has_color0(),
         "dropped element leaves no flag behind"
@@ -811,7 +811,7 @@ fn ff_vs_layout_clamps_tex_coord_count_to_8() {
             usage_index: 12,
         },
     ];
-    let layout = ff_vs_layout_from_elements(&elements, false);
+    let layout = ff_vs_layout_from_elements(&elements);
     assert_eq!(layout.tex_coord_count, 8);
 }
 
@@ -828,13 +828,13 @@ fn ff_vs_layout_in_spec_usage_index_7_yields_8() {
             usage_index: 7,
         },
     ];
-    let layout = ff_vs_layout_from_elements(&elements, false);
+    let layout = ff_vs_layout_from_elements(&elements);
     assert_eq!(layout.tex_coord_count, 8);
 }
 
 #[test]
 fn ff_vs_layout_single_tex0_yields_1() {
-    let layout = ff_vs_layout_from_elements(&[pos3(), tex0(12)], false);
+    let layout = ff_vs_layout_from_elements(&[pos3(), tex0(12)]);
     assert_eq!(layout.tex_coord_count, 1);
 }
 
