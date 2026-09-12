@@ -1638,8 +1638,7 @@ fn show_cursor_previous_state_survives_wm_size() {
     const WM_SIZE: u32 = 0x0005;
     let h = Harness::new();
 
-    // Same-size WM_SIZE (lparam = client height << 16 | width): arms the pin
-    // without churning the backbuffer (apply_auto_resize no-ops on equal dims).
+    // WM_SIZE (lparam = client height << 16 | width) arms the pin.
     let (width, height): (isize, isize) = (640, 480);
     h.send_window_message(WM_SIZE, 0, (height << 16) | width);
 

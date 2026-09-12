@@ -268,7 +268,7 @@ bitflags::bitflags! {
         ///
         /// The next WM_SETCURSOR / paint cycle needs to re-realise.
         const DIRTY = 1 << 1;
-        /// Latched on WM_SIZE-driven auto-resize.
+        /// Latched on `WM_SIZE`.
         ///
         /// Suppresses a single game-issued ShowCursor(FALSE) until the next
         /// ShowCursor(TRUE). Some games hide the cursor from their own
@@ -1172,35 +1172,23 @@ extern "system" fn cursor_wnd_proc(hwnd: *mut c_void, msg: u32, wp: usize, lp: i
             post_message(hwnd, WM_APP_REACTIVATE_FULLSCREEN, 0, 0);
         }
     } else if msg == WM_SIZE {
-        // Implicit client-area resize from Wine's macdrv (e.g. macOS
-        // shrunk the visible rect after we attached the layer because
-        // chrome / dock take some pixels). lParam's low / high words
-        // are the new client width / height in pixels — trigger an
-        // auto-resize so a windowed back buffer keeps matching the
-        // client area the game sees.
-        //
-        // Skipped while mtld3d is the one moving a window: a fullscreen
-        // transition's own `SetWindowPos` bounces back here, and that
-        // path already resolved the back-buffer size. The latch is
-        // process-global because the bounce is delivered to whichever
-        // device is subclassed on the window, which need not be the
-        // device doing the move. A fullscreen device never follows the
-        // window: its logical size is the requested mode, and an external
-        // shrink is answered by re-covering the monitor — deferred through
-        // a posted message, because native leaves the app-set rect in
-        // place until window events are processed (test_window_position).
+        // Windowed presentation stretches the existing back buffer to the
+        // client area. Only an explicit Reset changes its dimensions, depth
+        // surface, viewport or scissor; the game may retain all of them.
+        // Fullscreen devices re-cover their monitor after an external resize,
+        // unless the message was caused by our own window transition.
         let lp_bits = lp.cast_unsigned();
         let new_width = u32::try_from(lp_bits & 0xFFFF).expect("16-bit value fits u32");
         let new_height = u32::try_from((lp_bits >> 16) & 0xFFFF).expect("16-bit value fits u32");
         // SAFETY: see WM_SETCURSOR branch — `dev_ptr` is live for
         // the lifetime of the subclass.
         let dev = unsafe { &mut *dev_ptr };
-        if new_width != 0 && new_height != 0 && !crate::fullscreen::driving_window() {
-            if dev.fullscreen_window().is_some() {
-                post_message(hwnd, WM_APP_REASSERT_FULLSCREEN, 0, lp);
-            } else {
-                dev.apply_auto_resize(new_width, new_height);
-            }
+        if new_width != 0
+            && new_height != 0
+            && !crate::fullscreen::driving_window()
+            && dev.fullscreen_window().is_some()
+        {
+            post_message(hwnd, WM_APP_REASSERT_FULLSCREEN, 0, lp);
         }
         // WoW's own `WM_SIZE` handler (about to run via the
         // `CallWindowProcW` tail below) will call `ShowCursor(FALSE)`

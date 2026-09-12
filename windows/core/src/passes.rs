@@ -1025,7 +1025,7 @@ pub struct FrameReset {
     /// Registered as the back buffer's twin every frame, so a
     /// `D3DRS_SRGBWRITEENABLE` draw straight onto the swap chain attaches it
     /// and Metal encodes after the blender. Re-supplied per frame because
-    /// `Reset` and an auto-resize replace the pair together.
+    /// `Reset` replaces the pair together.
     pub backbuffer_srgb: MetalHandle<MTLTextureKind>,
     /// Multisampled companion of the back buffer, NULL when it is single-sampled.
     pub backbuffer_msaa: MetalHandle<MTLTextureKind>,
@@ -1534,8 +1534,8 @@ impl PassState {
         self.current_extra_color = [ExtraColorSlot::NONE; 3];
         self.current_extra_present_mask = 0;
         self.current_extra_attachments = ExtraColorAttachments::NONE;
-        // Re-register the back buffer's sRGB twin every frame. `Reset` and an
-        // auto-resize replace the pair together and destroy the old view with
+        // Re-register the back buffer's sRGB twin every frame. `Reset`
+        // replaces the pair together and destroys the old view with
         // the old texture, so a registration naming the retired one must not
         // survive the swap.
         if self.backbuffer_texture != backbuffer {

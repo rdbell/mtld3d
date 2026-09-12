@@ -4293,8 +4293,7 @@ fn a_clear_only_pass_does_not_coalesce_across_an_srgb_view_change() {
 ///
 /// A `D3DRS_SRGBWRITEENABLE` draw straight onto the swap chain therefore
 /// attaches the twin, exactly as one onto a render-target texture does. The
-/// pair is re-supplied every frame because `Reset` and an auto-resize
-/// replace both halves together.
+/// pair is re-supplied every frame because `Reset` replaces both halves together.
 #[test]
 fn the_backbuffer_attaches_its_srgb_twin() {
     let mut s = fresh();

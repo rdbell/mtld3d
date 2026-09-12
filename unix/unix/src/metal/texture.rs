@@ -142,8 +142,8 @@ fn srgb_twin_view(
 /// Clear a freshly created render target to opaque black.
 ///
 /// One empty render pass with `LoadAction::Clear` in its own command
-/// buffer. Runs on the creation paths only (device create, `Reset`,
-/// auto-resize), so cost is irrelevant. Failure to encode leaves the
+/// buffer. Runs on the creation paths only (device create and `Reset`).
+/// Failure to encode leaves the
 /// texture with undefined contents, which is what creation produced
 /// anyway, so it is logged and tolerated rather than failing creation.
 fn clear_texture_black(

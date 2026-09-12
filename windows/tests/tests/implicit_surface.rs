@@ -256,3 +256,57 @@ fn implicit_depth_stencil_is_cached() {
         "GetDepthStencilSurface must return the one cached implicit surface"
     );
 }
+
+/// Window resizing preserves the game's surfaces and rasterization coordinates.
+#[test]
+fn window_resize_preserves_implicit_surfaces_and_viewport() {
+    const WM_SIZE: u32 = 0x0005;
+
+    let h = Harness::with_depth();
+    let backbuffer = h.back_buffer(0);
+    let depth = h.depth_stencil_surface().expect("implicit depth surface");
+    let (_, before) = backbuffer.desc();
+    let (_, depth_before) = depth.desc();
+    let viewport = mtld3d_types::D3DVIEWPORT9 {
+        x: 8,
+        y: 12,
+        width: 200,
+        height: 160,
+        min_z: 0.25,
+        max_z: 0.75,
+    };
+    let scissor = mtld3d_types::D3DRECT {
+        x1: 16,
+        y1: 20,
+        x2: 180,
+        y2: 140,
+    };
+    assert_eq!(h.set_viewport(&viewport), D3D_OK);
+    assert_eq!(h.set_scissor_rect(&scissor), D3D_OK);
+    for (width, height) in [(1280_isize, 960_isize), (320, 240), (0, 0), (640, 480)] {
+        h.send_window_message(WM_SIZE, 0, (height << 16) | width);
+        let (hr, after) = backbuffer.desc();
+        assert_eq!(hr, D3D_OK);
+        assert_eq!((after.width, after.height), (before.width, before.height));
+        let (hr, depth_after) = depth.desc();
+        assert_eq!(hr, D3D_OK);
+        assert_eq!(
+            (depth_after.width, depth_after.height),
+            (depth_before.width, depth_before.height)
+        );
+        let after = h.viewport();
+        assert_eq!(
+            (after.x, after.y, after.width, after.height),
+            (8, 12, 200, 160)
+        );
+        assert_eq!((after.min_z, after.max_z), (0.25, 0.75));
+        let after = h.scissor_rect();
+        assert_eq!((after.x1, after.y1, after.x2, after.y2), (16, 20, 180, 140));
+    }
+    drop(depth);
+    drop(backbuffer);
+    assert_eq!(h.reset(800, 600), D3D_OK);
+    let (hr, after) = h.back_buffer(0).desc();
+    assert_eq!(hr, D3D_OK);
+    assert_eq!((after.width, after.height), (800, 600));
+}

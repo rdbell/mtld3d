@@ -2399,143 +2399,6 @@ impl DeviceInner {
             crate::fullscreen::leave(&saved);
         }
     }
-
-    /// Apply an implicit backbuffer resize triggered by a chrome-shrink `WM_SIZE`.
-    ///
-    /// Mirrors `device_reset`'s size-change pipeline (drain → destroy
-    /// old textures → adopt new dims → push `drawableSize` → recreate
-    /// textures → reseed `current_frame` → re-push default viewport) but
-    /// **skips** `reset_to_defaults` — the game didn't request a Reset,
-    /// so its render states / textures / vertex bindings must survive.
-    /// No-op when dims already match, and for a fullscreen device: its
-    /// logical size is the mode the game requested, decoupled from the
-    /// window, and only a `Reset` may change it. Caller drives this from
-    /// the cursor subclass wndproc on the API thread; encoder is paused
-    /// inside `flush_current_frame_blocking` for the destroy/create
-    /// span so no in-flight cmdbuf references the freed handles.
-    pub fn apply_auto_resize(&mut self, new_width: u32, new_height: u32) {
-        if new_width == 0 || new_height == 0 {
-            return;
-        }
-        if self.fullscreen.is_some() {
-            debug!(
-                target: LOG_TARGET,
-                "WM_SIZE ({new_width}x{new_height}) on a fullscreen device ignored; the back \
-                 buffer keeps the requested {}x{}",
-                self.backbuffer_width, self.backbuffer_height,
-            );
-            return;
-        }
-        if new_width == self.backbuffer_width && new_height == self.backbuffer_height {
-            return;
-        }
-        debug!(
-            target: LOG_TARGET,
-            "apply_auto_resize: backbuffer {}x{} → {new_width}x{new_height} (WM_SIZE-driven)",
-            self.backbuffer_width, self.backbuffer_height,
-        );
-
-        self.flush_current_frame_blocking();
-        self.encoder_reset();
-
-        let old_handles: [u64; 5] = [
-            self.backbuffer_handle.raw(),
-            self.backbuffer_srgb_handle.raw(),
-            self.backbuffer_msaa_handle.raw(),
-            self.backbuffer_msaa_srgb_handle.raw(),
-            self.depth_stencil_handle.raw(),
-        ];
-        let live: Vec<u64> = old_handles.iter().copied().filter(|&h| h != 0).collect();
-        if !live.is_empty() {
-            let mut destroy = mtld3d_shared::DestroyResourcesBulkParams {
-                kind: mtld3d_shared::mtl::DestroyKind::Texture,
-                pad0: 0,
-                handles_ptr: live.as_ptr() as u64,
-                count: u32::try_from(live.len()).expect("at most 5 handles"),
-                pad1: 0,
-            };
-            unix_call(&mut destroy);
-        }
-
-        self.set_backbuffer_dims(new_width, new_height);
-
-        let mut bb_params = mtld3d_shared::CreateBackbufferParams {
-            device_handle: self.device_handle,
-            queue_handle: self.queue_handle,
-            width: self.render_scale.dimension(new_width),
-            height: self.render_scale.dimension(new_height),
-            sample_count: u32::from(self.backbuffer_sample_count),
-            pad0: 0,
-            texture_handle: MetalHandle::NULL,
-            srgb_texture_handle: MetalHandle::NULL,
-            msaa_texture_handle: MetalHandle::NULL,
-            msaa_srgb_texture_handle: MetalHandle::NULL,
-        };
-        let status = unix_call(&mut bb_params);
-        if status != 0 || bb_params.texture_handle.is_null() {
-            error!(
-                target: LOG_TARGET,
-                "apply_auto_resize: CreateBackbuffer failed (0x{status:08X}) — device unusable",
-            );
-            self.set_backbuffer_handle(MetalHandle::NULL, MetalHandle::NULL);
-            self.set_backbuffer_msaa_handle(MetalHandle::NULL, MetalHandle::NULL);
-            self.set_depth_stencil_handle(MetalHandle::NULL);
-            return;
-        }
-        self.set_backbuffer_handle(bb_params.texture_handle, bb_params.srgb_texture_handle);
-        self.set_backbuffer_msaa_handle(
-            bb_params.msaa_texture_handle,
-            bb_params.msaa_srgb_texture_handle,
-        );
-
-        if self.depth_stencil_format != 0 {
-            let Some(pixel_format) =
-                mtld3d_core::format::map_d3d_depth_format(self.depth_stencil_format)
-            else {
-                error!(
-                    target: LOG_TARGET,
-                    "apply_auto_resize: depth_stencil_format {} has no Metal mapping — depth lost",
-                    self.depth_stencil_format,
-                );
-                self.set_depth_stencil_handle(MetalHandle::NULL);
-                return;
-            };
-            // Render space, matching the colour attachment exactly.
-            let mut ds_params = CreateDepthTextureParams {
-                device_handle: self.device_handle,
-                width: bb_params.width,
-                height: bb_params.height,
-                pixel_format,
-                sample_count: u32::from(self.backbuffer_sample_count),
-                texture_handle: MetalHandle::NULL,
-            };
-            let status = unix_call(&mut ds_params);
-            if status != 0 || ds_params.texture_handle.is_null() {
-                error!(
-                    target: LOG_TARGET,
-                    "apply_auto_resize: CreateDepthTexture failed (0x{status:08X}) — depth lost",
-                );
-                self.set_depth_stencil_handle(MetalHandle::NULL);
-                return;
-            }
-            self.set_depth_stencil_handle(ds_params.texture_handle);
-        } else {
-            self.set_depth_stencil_handle(MetalHandle::NULL);
-        }
-
-        self.reseed_current_frame();
-
-        let viewport = D3DVIEWPORT9 {
-            x: 0,
-            y: 0,
-            width: new_width,
-            height: new_height,
-            min_z: 0.0,
-            max_z: 1.0,
-        };
-        self.set_viewport(viewport);
-        self.scissor_rect = [0, 0, new_width, new_height];
-    }
 }
 
 // ── IDirect3DDevice9 COM object ──
@@ -3871,12 +3734,8 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
             return hr;
         }
     } else {
-        // Skip flush + destroy + recreate + setDrawableSize entirely. The game
-        // called Reset for state-clobber reasons after our `apply_auto_resize`
-        // already matched the back-buffer to the new client size (or the game
-        // Reset with identical dims). Re-issuing the recreate cycle would be a
-        // wasteful no-op — up to ~tens of ms per Reset depending on GPU
-        // workload depth. State-defaults + reseed + display-sync queue below
+        // The dimensions are unchanged, so reuse the existing textures.
+        // State-defaults + reseed + display-sync queue below
         // still run unconditionally (`Reset` always clobbers state per spec).
         // The implicit depth-stencil is still reconciled, since the
         // EnableAutoDepthStencil flag can flip without a resize (a no-op when
@@ -3920,8 +3779,7 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
     //    submit a freed MTLTexture pointer (status=0xc0000005 on the
     //    unix side). Runs before the state defaults: `reset_to_defaults`
     //    pushes ops (default viewport, unbinds), and pushing them first
-    //    would hand them to the reseed to throw away, so this keeps the
-    //    order `apply_auto_resize` already uses.
+    //    would hand them to the reseed to throw away.
     dev.reseed_current_frame();
 
     // 8. Reset device state to D3D9 defaults. Cursor + silent-write

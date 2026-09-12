@@ -557,7 +557,7 @@ static DRIVING_WINDOW: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomi
 
 /// `true` while any mtld3d window move is in flight.
 ///
-/// Read by the cursor subclass to skip the auto-resize for a `WM_SIZE` we
+/// Read by the cursor subclass to skip the fullscreen reassertion for a `WM_SIZE` we
 /// caused ourselves.
 pub fn driving_window() -> bool {
     DRIVING_WINDOW.load(core::sync::atomic::Ordering::Relaxed) != 0
@@ -644,7 +644,7 @@ pub fn enter(hwnd: *mut c_void, manage_window: bool, mode: Option<ModeRequest>) 
     // Held across the mode-set too: win32u broadcasts `WM_DISPLAYCHANGE`
     // synchronously from inside it, and a game handler that answers by
     // resizing its window bounces a `WM_SIZE` the subclass would otherwise
-    // auto-resize on; the window is placed right after anyway.
+    // reassert fullscreen coverage for; the window is placed right after anyway.
     let _driving = DrivingGuard::new();
     let mut saved = SavedWindow {
         hwnd,

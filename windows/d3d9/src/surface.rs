@@ -75,8 +75,7 @@ pub struct SystemMemoryDst {
 /// forward their refcount to the device on the 0↔1 boundary, are never freed
 /// when their refcount reaches 0 (destroyed only at device teardown), and
 /// resolve their Metal handle + dimensions **live** from the device every call
-/// — so a backbuffer/depth texture recreated by a window resize
-/// (`DeviceInner::apply_auto_resize`) or `Reset` is never observed through a
+/// so a backbuffer/depth texture recreated by `Reset` is never observed through a
 /// freed handle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ImplicitKind {
@@ -885,7 +884,7 @@ impl Direct3DSurface9 {
     /// sRGB twin view of [`Self::metal_color_handle`], or null.
     ///
     /// The implicit back buffer answers with the device's current twin, which
-    /// `Reset` and an auto-resize replace along with the texture itself.
+    /// `Reset` replaces along with the texture itself.
     pub fn metal_color_srgb_handle(&self) -> MetalHandle<MTLTextureKind> {
         let inner = self.inner();
         if inner.implicit_kind == ImplicitKind::Backbuffer && !inner.device_inner.is_null() {
