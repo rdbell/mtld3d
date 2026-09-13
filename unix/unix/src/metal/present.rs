@@ -113,6 +113,8 @@ use crate::LOG_TARGET;
 /// (`shader.rs`) — keeps the same library working on Intel/AMD Macs.
 const PRESENT_MSL: &str = include_str!("present.msl");
 
+static PICTURE_PIPELINES: OnceLock<Option<PicturePipelines>> = OnceLock::new();
+
 /// Cached present-pass resources keyed on the device.
 ///
 /// mtld3d has one `MTLDevice` per process so a global `OnceLock` is the
@@ -135,6 +137,20 @@ pub struct PresentPipelines {
     pub cursor_copy: u64,        // MTLRenderPipelineState*
     pub cursor_passthrough: u64, // MTLRenderPipelineState*
     pub cursor_bt2446: u64,      // MTLRenderPipelineState*
+}
+
+/// Optional effects have a separate lazy library: failure cannot disable normal presentation.
+#[derive(Clone, Copy)]
+pub struct PicturePipelines {
+    pub picture_fxaa: u64,
+    pub picture_extract: u64,
+    pub picture_blur: u64,
+    pub picture_composite: u64,
+}
+
+/// Compile picture shaders only when an effect is first enabled; cache failures, too.
+pub fn ensure_picture_resources(device: &ProtocolObject<dyn MTLDevice>) -> Option<PicturePipelines> {
+    *PICTURE_PIPELINES.get_or_init(|| create_picture(device))
 }
 
 /// The BT.2446 fragment uniform block for a target peak, as the shader reads it.
@@ -171,6 +187,40 @@ pub fn ensure_resources(device: &ProtocolObject<dyn MTLDevice>) -> Option<Presen
     }
     let resources = create(device)?;
     Some(*PIPELINES.get_or_init(|| resources))
+}
+
+fn create_picture(device: &ProtocolObject<dyn MTLDevice>) -> Option<PicturePipelines> {
+    let source = NSString::from_str(concat!(
+        include_str!("present.msl"),
+        "\n",
+        include_str!("picture.msl"),
+    ));
+    let options = MTLCompileOptions::new();
+    options.setLanguageVersion(MTLLanguageVersion::Version2_4);
+    options.setMathMode(MTLMathMode::Fast);
+    let library = device
+        .newLibraryWithSource_options_error(&source, Some(&options))
+        .map_err(|error| {
+            log::error!(target: LOG_TARGET, "picture: MSL compilation failed: {error}");
+        })
+        .ok()?;
+    library.setLabel(Some(&NSString::from_str("mtld3d-picture")));
+    let vs = library.newFunctionWithName(&NSString::from_str("mtld3d_present_vs"))?;
+    let make = |name: &str, format| {
+        let ps = library.newFunctionWithName(&NSString::from_str(name))?;
+        build_pipeline(device, &vs, &ps, format, name)
+    };
+    // Keep retains local until every pipeline succeeds, so partial failure releases them.
+    let fxaa = make("mtld3d_picture_fxaa", MTLPixelFormat::BGRA8Unorm)?;
+    let extract = make("mtld3d_picture_extract", MTLPixelFormat::RGBA16Float)?;
+    let blur = make("mtld3d_picture_blur", MTLPixelFormat::RGBA16Float)?;
+    let composite = make("mtld3d_picture_composite", MTLPixelFormat::BGRA8Unorm)?;
+    Some(PicturePipelines {
+        picture_fxaa: Retained::into_raw(fxaa) as u64,
+        picture_extract: Retained::into_raw(extract) as u64,
+        picture_blur: Retained::into_raw(blur) as u64,
+        picture_composite: Retained::into_raw(composite) as u64,
+    })
 }
 
 fn create(device: &ProtocolObject<dyn MTLDevice>) -> Option<PresentPipelines> {

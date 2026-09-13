@@ -1,0 +1,101 @@
+// Uses the presentation vertex stage and the shared piecewise sRGB decoder.
+struct PictureUniforms {
+    float4 color;  // sharpening, exposure stops, contrast, saturation
+    float4 glow;   // temperature, bloom strength, threshold, radius
+    float4 pass;   // horizontal blur flag
+};
+
+inline float picture_luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+inline float3 picture_encode(float3 linear) {
+    linear = max(linear, float3(0.0));
+    return select(1.055 * pow(linear, float3(1.0 / 2.4)) - 0.055,
+                  12.92 * linear, linear <= float3(0.0031308));
+}
+
+// Directional FXAA in encoded space. Flat regions return the original sample.
+fragment float4 mtld3d_picture_fxaa(VsOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float2 px = 1.0 / float2(src.get_width(), src.get_height());
+    float4 center = src.sample(s, in.uv);
+    float nw = picture_luma(src.sample(s, in.uv + float2(-1, -1) * px).rgb);
+    float ne = picture_luma(src.sample(s, in.uv + float2(1, -1) * px).rgb);
+    float sw = picture_luma(src.sample(s, in.uv + float2(-1, 1) * px).rgb);
+    float se = picture_luma(src.sample(s, in.uv + float2(1, 1) * px).rgb);
+    float mid = picture_luma(center.rgb);
+    float lo = min(mid, min(min(nw, ne), min(sw, se)));
+    float hi = max(mid, max(max(nw, ne), max(sw, se)));
+    if (hi - lo < max(0.0312, hi * 0.125)) return center;
+    float2 direction = float2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+    float reduce = max((nw + ne + sw + se) * (0.25 / 8.0), 1.0 / 128.0);
+    direction = clamp(direction / (min(abs(direction.x), abs(direction.y)) + reduce), -8.0, 8.0) * px;
+    float3 a = 0.5 * (src.sample(s, in.uv - direction / 6.0).rgb + src.sample(s, in.uv + direction / 6.0).rgb);
+    float3 b = a * 0.5 + 0.25 * (src.sample(s, in.uv - direction * 0.5).rgb + src.sample(s, in.uv + direction * 0.5).rgb);
+    float lb = picture_luma(b);
+    return float4(lb < lo || lb > hi ? a : b, center.a);
+}
+
+// A quarter-size bright pass averages sixteen source samples in linear light.
+fragment float4 mtld3d_picture_extract(VsOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                      constant PictureUniforms& u [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float2 px = 1.0 / float2(src.get_width(), src.get_height());
+    float threshold = srgb_eotf(float3(u.glow.z)).r;
+    float3 total = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            float3 c = srgb_eotf(src.sample(s, in.uv + (float2(x, y) - 1.5) * px).rgb);
+            float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
+            total += c * max(luma - threshold, 0.0) / max(luma, 0.00001);
+        }
+    }
+    return float4(total / 16.0, 1.0);
+}
+
+// Separable Gaussian blur at quarter resolution, five bilinear samples per pass.
+fragment float4 mtld3d_picture_blur(VsOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                   constant PictureUniforms& u [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float2 axis = u.pass.x > 0.5 ? float2(1.0 / src.get_width(), 0.0) : float2(0.0, 1.0 / src.get_height());
+    axis *= u.glow.w / 3.0;
+    float3 c = src.sample(s, in.uv).rgb * 0.227027;
+    c += (src.sample(s, in.uv + axis * 1.384615).rgb + src.sample(s, in.uv - axis * 1.384615).rgb) * 0.316216;
+    c += (src.sample(s, in.uv + axis * 3.230769).rgb + src.sample(s, in.uv - axis * 3.230769).rgb) * 0.070270;
+    return float4(c, 1.0);
+}
+
+fragment float4 mtld3d_picture_composite(VsOut in [[stage_in]], texture2d<float> src [[texture(0)]],
+                                       texture2d<float> bloom [[texture(1)]],
+                                       constant PictureUniforms& u [[buffer(0)]]) {
+    constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+    float4 center = src.sample(s, in.uv);
+    float3 c = center.rgb;
+    if (u.color.x > 0.0) {
+        float2 px = 1.0 / float2(src.get_width(), src.get_height());
+        float3 n = src.sample(s, in.uv - float2(0, px.y)).rgb;
+        float3 e = src.sample(s, in.uv + float2(px.x, 0)).rgb;
+        float3 w = src.sample(s, in.uv - float2(px.x, 0)).rgb;
+        float3 south = src.sample(s, in.uv + float2(0, px.y)).rgb;
+        float3 lo = min(c, min(min(n, e), min(w, south)));
+        float3 hi = max(c, max(max(n, e), max(w, south)));
+        float range = max(max(hi.r - lo.r, hi.g - lo.g), hi.b - lo.b);
+        // Reduce gain across high-contrast edges; local bounds prohibit ringing overshoot.
+        float gain = u.color.x * 0.75 * (1.0 - smoothstep(0.1, 0.6, range));
+        c = clamp(c + (c - (n + e + w + south) * 0.25) * gain, lo, hi);
+    }
+    bool grade = u.color.y != 0.0 || u.color.z != 1.0 || u.color.w != 1.0 || u.glow.x != 0.0;
+    if (grade || u.glow.y > 0.0) {
+        c = srgb_eotf(c);
+        if (u.glow.y > 0.0) {
+            // Screen blend preserves the normalized SDR range expected by the HDR mapper.
+            c = 1.0 - (1.0 - c) * (1.0 - saturate(bloom.sample(s, in.uv).rgb * u.glow.y));
+        }
+        c *= exp2(u.color.y);
+        // Approximate warm/cool balance with a neutral green channel, not a Kelvin calibration.
+        c *= exp2(float3(u.glow.x * 0.25, 0.0, -u.glow.x * 0.25));
+        float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
+        c = mix(float3(luma), c, u.color.w);
+        c = picture_encode(c);
+        c = (c - 0.5) * u.color.z + 0.5;
+    }
+    return float4(saturate(c), center.a);
+}

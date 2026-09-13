@@ -50,6 +50,12 @@ static HDR_ENABLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// picked for it.
 static COLOR_SPACE_POLICY: AtomicU32 = AtomicU32::new(ColorSpacePolicy::Passthrough as u32);
 
+/// Explicit session choices survive device Reset; MAX means use the attach configuration.
+static SESSION_DISPLAY: AtomicU32 = AtomicU32::new(u32::MAX);
+static COLOR_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
+/// The cursor must retag even when the SDR/HDR format itself did not change.
+static COLOR_REVISION: AtomicU64 = AtomicU64::new(0);
+
 /// Whether the bound window is currently fully occluded (covered or minimised).
 ///
 /// I.e. its `NSWindow` occlusion state lacks the `Visible` bit. Seeded at
@@ -1125,6 +1131,17 @@ pub fn attach_metal_layer(
         cursor_kick_sink_ptr,
         software_cursor,
     } = request;
+    let session = SESSION_DISPLAY.load(Ordering::Relaxed);
+    let (hdr_enable, color_space) = if session == u32::MAX {
+        (hdr_enable, color_space)
+    } else {
+        let policy = if session & 2 != 0 {
+            ColorSpacePolicy::Accurate
+        } else {
+            ColorSpacePolicy::Passthrough
+        };
+        (session & 1 != 0, policy)
+    };
     if hwnd == 0 || device_handle.is_null() {
         return None;
     }
@@ -1281,6 +1298,40 @@ pub fn set_display_sync_enabled(
     PRESENT_PACING_BITS.store(pack_pacing(pacing), Ordering::Relaxed);
     let panel_max_hz = NSScreen::mainScreen(mtm).map_or(0.0_f64, |s| screen_max_hz(&s));
     store_min_present_duration(panel_max_hz, pacing);
+}
+
+/// Current requested HDR and accurate sRGB tagging, for the native panel.
+pub fn session_display() -> (bool, bool) {
+    (
+        HDR_ENABLE_REQUESTED.load(Ordering::Relaxed),
+        COLOR_SPACE_POLICY.load(Ordering::Relaxed) == ColorSpacePolicy::Accurate as u32,
+    )
+}
+
+/// Apply the native panel's display choices on the AppKit thread.
+pub fn set_session_display(_mtm: objc2::MainThreadMarker, hdr: bool, accurate: bool) {
+    SESSION_DISPLAY.store(u32::from(hdr) | (u32::from(accurate) << 1), Ordering::Relaxed);
+    HDR_ENABLE_REQUESTED.store(hdr, Ordering::Relaxed);
+    let policy = if accurate {
+        ColorSpacePolicy::Accurate
+    } else {
+        ColorSpacePolicy::Passthrough
+    };
+    COLOR_SPACE_POLICY.store(policy as u32, Ordering::Relaxed);
+    COLOR_REFRESH_PENDING.store(true, Ordering::Relaxed);
+    refresh_headroom_on_main();
+    info!(target: LOG_TARGET, "picture: session HDR requested={hdr}, color.space={policy:?}");
+}
+
+/// Report actual display capability separately from the user's HDR request.
+pub fn session_display_status() -> &'static str {
+    if HDR_ACTIVE.load(Ordering::Relaxed) {
+        "HDR enabled; brightness follows the display's available headroom."
+    } else if HDR_ENABLE_REQUESTED.load(Ordering::Relaxed) {
+        "HDR requested; this display currently uses SDR output."
+    } else {
+        "SDR output."
+    }
 }
 
 /// Host-time seconds (`CFTimeInterval`) to nanoseconds, saturating.
@@ -2148,9 +2199,11 @@ fn follow_screen_layer_mode(screen: &objc2_app_kit::NSScreen) {
     let hdr_enable = HDR_ENABLE_REQUESTED.load(Ordering::Relaxed);
     // The layer already matches this screen, which is every poll of a session
     // that stays on one display.
-    let Some(mode) = layer_mode_change(applied, potential, hdr_enable) else {
+    let changed = layer_mode_change(applied, potential, hdr_enable);
+    if changed.is_none() && !COLOR_REFRESH_PENDING.load(Ordering::Relaxed) {
         return;
-    };
+    }
+    let mode = changed.unwrap_or(applied);
     // No layer bound: attach configures the first one itself, and a torn-down
     // device leaves none to reconcile.
     let Some(layer) = retain_bound_layer() else {
@@ -2178,11 +2231,13 @@ fn follow_screen_layer_mode(screen: &objc2_app_kit::NSScreen) {
         },
     );
     HDR_ACTIVE.store(mode == LayerMode::Hdr, Ordering::Relaxed);
+    COLOR_REFRESH_PENDING.store(false, Ordering::Relaxed);
+    COLOR_REVISION.fetch_add(1, Ordering::Relaxed);
     let pf = layer.pixelFormat();
     let wants = layer.wantsExtendedDynamicRangeContent();
     info!(
         target: LOG_TARGET,
-        "hdr: window moved onto '{screen_name}' (potential={potential:.2}×), layer reconfigured: \
+        "hdr: display '{screen_name}' (potential={potential:.2}×), layer reconfigured: \
          pixelFormat={pf:?} wantsEDR={wants} colorspace={cs_label}",
     );
 }

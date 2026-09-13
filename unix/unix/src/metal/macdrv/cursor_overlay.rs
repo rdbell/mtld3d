@@ -679,10 +679,11 @@ struct Overlay {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// One `MTLTexture` per sprite hash, uploaded on first render.
     textures: FxHashMap<u64, Retained<ProtocolObject<dyn MTLTexture>>>,
-    /// What the layer's drawable shows right now.
-    content: Content,
+    /// What the layer's drawable shows; None requires a fresh draw or transparent clear.
+    content: Option<Content>,
     /// The layer configuration in place; `None` until the first apply.
     mode: Option<LayerMode>,
+    color_revision: u64,
     /// The sprite the PE side wants shown, `None` until one was uploaded.
     wanted: Option<(u64, SpriteGeometry)>,
     /// The PE side's last word on visibility.
@@ -785,8 +786,9 @@ impl Overlay {
             layer,
             queue,
             textures: FxHashMap::default(),
-            content: Content::Transparent,
+            content: None,
             mode: None,
+            color_revision: u64::MAX,
             wanted: None,
             wanted_visible: false,
         })
@@ -799,8 +801,11 @@ impl Overlay {
         } else {
             LayerMode::Sdr
         };
-        if self.mode != Some(mode) {
+        let revision = super::COLOR_REVISION.load(Ordering::Relaxed);
+        if self.mode != Some(mode) || self.color_revision != revision {
             self.reconfigure_layer(mtm, mode);
+            self.color_revision = revision;
+            self.content = None;
         }
         self.wanted_visible = wanted.visible;
         if wanted.hash == 0 {
@@ -862,7 +867,7 @@ impl Overlay {
     /// The layer's surface stays in the window's scene either way: hidden is a
     /// transparent clear, never a removed layer.
     fn ensure_content(&mut self, content: Content) {
-        if self.content == content {
+        if self.content == Some(content) {
             return;
         }
         let presented = match content {
@@ -875,7 +880,7 @@ impl Overlay {
             }
         };
         if presented {
-            self.content = content;
+            self.content = Some(content);
             debug!(target: LOG_TARGET, "cursor: overlay shows {content:?}");
         }
     }
@@ -1021,11 +1026,11 @@ impl Overlay {
             // Re-render on a sprite or layer-mode change, and on a headroom
             // move worth it; otherwise the drawable already shows this sprite.
             let peak = match self.content {
-                Content::Sprite {
+                Some(Content::Sprite {
                     hash: h,
                     mode: m,
                     peak: p,
-                } if h == hash && m == mode && !peak_changed(p, peak) => p,
+                }) if h == hash && m == mode && !peak_changed(p, peak) => p,
                 _ => peak,
             };
             self.ensure_content(Content::Sprite { hash, mode, peak });

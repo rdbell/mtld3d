@@ -174,31 +174,48 @@ banned() {
     fi
 }
 
-# Only the native host's superclass miniaturization lacks a typed objc2 binding.
-# Match the complete statement and require exactly one occurrence in its file.
+# AppKit superclass dispatch and a local target/action token need narrow exceptions.
+# Match each complete statement and require its paired callback where applicable.
 objc_selectors() {
     hits=$(awk -v root="$(pwd)" '
         BEGIN {
             site = "unix/unix/src/metal/macdrv/native_host.rs"
             statement = "let _: () = msg_send![super(self), miniaturize: sender];"
+            action_site = "unix/unix/src/metal/macdrv/native_host/settings/picture_controls.rs"
+            callback_site = "unix/unix/src/metal/macdrv/native_host/settings.rs"
+            action_statement = "objc2::sel!(pictureChanged:)"
         }
         FNR == 1 {
             permitted = FILENAME == site || FILENAME == root "/" site
             if (permitted) seen = 1
+            action_permitted = FILENAME == action_site || FILENAME == root "/" action_site
+            callback_permitted = FILENAME == callback_site || FILENAME == root "/" callback_site
+            if (action_permitted) action_seen = 1
+            if (callback_permitted) callback_seen = 1
         }
         {
             line = $0
             sub(/^[ \t]*/, "", line)
             sub(/[ \t]*$/, "", line)
             if (line ~ /^\/\//) next
+            if (callback_permitted && line == "#[unsafe(method(pictureChanged:))]") callback_count++
+            if (callback_permitted && line == "fn picture_changed(&self, sender: &NSControl) {") signature_count++
             if (line !~ /msg_send!|(^|[^_A-Za-z0-9])class!\(|sel!\(/) next
             if (permitted && line == statement) {
                 count++
                 next
             }
+            if (action_permitted && line == action_statement) {
+                action_count++
+                next
+            }
             printf "%s:%d: %s\n", FILENAME, FNR, $0
         }
         END {
+            if (action_seen && action_count != 1)
+                printf "%s: expected exactly one settings action token, found %d\n", action_site, action_count
+            if (callback_seen && (callback_count != 1 || signature_count != 1))
+                printf "%s: expected one typed pictureChanged: callback\n", callback_site
             if (seen && count != 1)
                 printf "%s: expected exactly one approved superclass dispatch, found %d\n", site, count
         }

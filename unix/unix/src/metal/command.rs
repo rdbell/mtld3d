@@ -461,6 +461,9 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             // the layer's own surface. Whatever the two sizes are, present
             // resolves them here — nothing downstream can, since the
             // compositor sees only a finished drawable.
+            // The processed image is private to presentation; game readbacks use the original.
+            let processed = super::picture::encode(&cmd_buf, &present_texture);
+            let present_texture = processed.as_deref().unwrap_or(&present_texture);
             let device = cmd_buf.device();
             let geometry = PresentGeometry {
                 src: (present_texture.width(), present_texture.height()),
@@ -503,7 +506,7 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                 match route {
                     PresentRoute::Upscale => encode_hdr_present_upscaled(
                         &cmd_buf,
-                        &present_texture,
+                        present_texture,
                         &drawable_texture,
                         current,
                     ),
@@ -511,7 +514,7 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                     // one encode covers both an exact present and a
                     // minification.
                     PresentRoute::Copy | PresentRoute::Stretch => {
-                        encode_hdr_present(&cmd_buf, &present_texture, &drawable_texture, current)
+                        encode_hdr_present(&cmd_buf, present_texture, &drawable_texture, current)
                     }
                 }
             } else {
@@ -526,13 +529,13 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                         super::upscale::encode(
                             &cmd_buf,
                             &device,
-                            &present_texture,
+                            present_texture,
                             &drawable_texture,
                             MTLFXSpatialScalerColorProcessingMode::Perceptual,
-                        ) || encode_present_copy(&cmd_buf, &present_texture, &drawable_texture)
+                        ) || encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
                     }
                     PresentRoute::Stretch => {
-                        encode_present_copy(&cmd_buf, &present_texture, &drawable_texture)
+                        encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
                     }
                 }
             };
@@ -554,7 +557,7 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                 } else {
                     encode_present_blit(
                         &cmd_buf,
-                        &present_texture,
+                        present_texture,
                         &drawable_texture,
                         route,
                         params.present_texture.raw(),

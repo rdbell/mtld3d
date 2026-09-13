@@ -9,8 +9,9 @@ use objc2::{
     runtime::{AnyObject, ProtocolObject},
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSControlTextEditingDelegate, NSEvent, NSEventMask, NSEventModifierFlags,
-    NSPanel, NSTextField, NSTextFieldDelegate, NSWindowDelegate, NSWindowStyleMask,
+    NSBackingStoreType, NSControl, NSControlTextEditingDelegate, NSEvent, NSEventMask,
+    NSEventModifierFlags, NSPanel, NSTextField, NSTextFieldDelegate, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -21,7 +22,10 @@ use super::{
     FRAME_LIMIT, current, frame_limit,
 };
 
+mod picture_controls;
+
 pub struct Settings {
+    picture: picture_controls::PictureControls,
     panel: Retained<NSPanel>,
     value: Retained<NSTextField>,
     status: Retained<NSTextField>,
@@ -79,6 +83,17 @@ define_class!(
                     "Frame limit applied for this session."
                 }));
             log::info!(target: crate::LOG_TARGET, "native host: session frame limit set to {value}");
+        }
+    }
+
+    impl SettingsDelegate {
+        #[unsafe(method(pictureChanged:))]
+        fn picture_changed(&self, sender: &NSControl) {
+            let Some(host) = current() else { return };
+            let settings = host.settings.borrow();
+            let Some(settings) = settings.as_ref() else { return };
+            let status = settings.picture.changed(sender);
+            settings.status.setStringValue(&NSString::from_str(status));
         }
     }
 
@@ -195,7 +210,7 @@ impl Settings {
         let panel = {
             NSPanel::initWithContentRect_styleMask_backing_defer(
                 NSPanel::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(420.0, 190.0)),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(620.0, 640.0)),
                 NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
@@ -207,7 +222,7 @@ impl Settings {
         let content = panel.contentView().expect("a new panel has a content view");
         let label = NSTextField::labelWithString(&NSString::from_str("Frame limit"), mtm);
         label.setFrame(NSRect::new(
-            NSPoint::new(24.0, 132.0),
+            NSPoint::new(24.0, 586.0),
             NSSize::new(150.0, 24.0),
         ));
         let pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
@@ -216,7 +231,7 @@ impl Settings {
             mtm,
         );
         value.setFrame(NSRect::new(
-            NSPoint::new(180.0, 130.0),
+            NSPoint::new(208.0, 584.0),
             NSSize::new(100.0, 26.0),
         ));
         let note = NSTextField::labelWithString(
@@ -226,8 +241,8 @@ impl Settings {
             mtm,
         );
         note.setFrame(NSRect::new(
-            NSPoint::new(24.0, 65.0),
-            NSSize::new(372.0, 48.0),
+            NSPoint::new(24.0, 534.0),
+            NSSize::new(576.0, 48.0),
         ));
         let status = NSTextField::labelWithString(
             &NSString::from_str("Changes apply to the current session."),
@@ -235,21 +250,22 @@ impl Settings {
         );
         status.setFrame(NSRect::new(
             NSPoint::new(24.0, 20.0),
-            NSSize::new(372.0, 24.0),
+            NSSize::new(576.0, 24.0),
         ));
         for field in [&label, &value, &note, &status] {
             // SAFETY: all views live on this AppKit thread and the content view retains them.
             content.addSubview(field);
         }
         let delegate = SettingsDelegate::new(mtm);
+        let picture = picture_controls::PictureControls::new(&content, &delegate);
         panel.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         // SAFETY: the typed delegate is retained alongside the field until Settings is dropped.
         unsafe { value.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         if let Some(host) = current() {
             let frame = host.window.frame();
             panel.setFrameOrigin(NSPoint::new(
-                frame.origin.x + (frame.size.width - 420.0) / 2.0,
-                frame.origin.y + (frame.size.height - 218.0) / 2.0,
+                frame.origin.x + (frame.size.width - 620.0) / 2.0,
+                frame.origin.y + (frame.size.height - 668.0) / 2.0,
             ));
         } else {
             panel.center();
@@ -259,6 +275,7 @@ impl Settings {
                 | objc2_app_kit::NSWindowCollectionBehavior::MoveToActiveSpace,
         );
         Self {
+            picture,
             panel,
             value,
             status,

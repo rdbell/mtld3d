@@ -47,14 +47,19 @@ off and takes effect on the next launch. While playing:
   toggles native fullscreen. The game can reject minimize and close requests.
 
 The host keeps the original Wine child and Metal layer. It does not copy frames
-or add a rendering pass. Post-processing and frame generation are not implemented.
+or add a rendering pass on its own. Optional [picture controls](PICTURE-CONTROLS.md)
+add presentation passes when enabled. Frame generation is not implemented.
 Exclusive D3D fullscreen uses the existing Wine path. Older Unix libraries and
 Wine drivers without the versioned contract fall back to ordinary presentation.
 Unsupported MSAA and nonzero auto-depth formats are rejected before changing
 window ownership. Later GPU allocation failures are not transactional and do
 not promise restoration of the previous native-fullscreen state.
 
-## Validation
+## Validation of the original host, before picture controls
+
+The picture-controls addition has a successful production build and user manual
+acceptance recorded in [PICTURE-CONTROLS.md](PICTURE-CONTROLS.md). The automated
+results below apply to the previously shipped host only.
 
 The final production package passed an 18-stage bounded native probe on an LG
 TV at scale 1 and a Retina display at scale 2. Checks cover image quadrants,

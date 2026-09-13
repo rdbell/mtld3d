@@ -8,6 +8,7 @@ pub mod handle;
 mod macdrv;
 mod null_texture;
 mod pipeline;
+mod picture;
 mod present;
 mod sampler;
 mod shader;
