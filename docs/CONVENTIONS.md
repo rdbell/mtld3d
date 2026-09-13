@@ -17,7 +17,7 @@ Most of this document is enforced by `make check`: `cargo +nightly fmt --check`,
 | `static … : OnceLock` confined to the three runtime-argument sites | §`LazyLock` over `OnceLock` |
 | `pub(crate)` = 0 | §No `pub(crate)` |
 | `extern "stdcall"` = 0 | §`extern "system"` everywhere |
-| `msg_send!` / `class!` / `sel!` = 0 | §No raw `msg_send!` |
+| `msg_send!` = 1 exact superclass dispatch; `class!` / `sel!` = 0 | §No raw `msg_send!` |
 | `HashMap` / `HashSet` = 0 (maps are `FxHashMap` / `FxHashSet`) | §FxHash for maps, xxh3 for content |
 | `DefaultHasher` / `RandomState` = 0 (content hashes are xxh3) | §FxHash for maps, xxh3 for content |
 | `mod.rs` files = 0 | §Module style |
@@ -390,7 +390,9 @@ How to apply:
 - Protocol inheritance (e.g. handing a `CAMetalDrawable` to `MTLCommandBuffer::presentDrawable`) uses `ProtocolObject::from_ref(&*sub_obj)` — sound because the sub-protocol trait extends the super-protocol trait. Type inference at the call site picks the target protocol.
 - `MainThreadOnly` classes (`NSScreen` / `NSView` / `NSWindow` / most of AppKit): mtld3d runs the API thread off the AppKit main thread, so class methods that require `MainThreadMarker` need `unsafe { MainThreadMarker::new_unchecked() }` with a SAFETY comment naming the read-only property being queried.
 
-Hard rule: no new `msg_send!`, `class!`, or `sel!` callsites — they're a grep away from being banned mechanically. If a binding is genuinely missing from objc2 framework crates, declare it locally via `objc2::extern_class!` / `extern_methods!` (the same macros the framework crates use) so the surface stays typed.
+Hard rule: use typed bindings for every new selector. If a binding is missing from objc2 framework crates, declare it locally via `objc2::extern_class!` / `extern_methods!` so the surface stays typed. The audit rejects raw `msg_send!`, `class!`, and `sel!` except for the single superclass dispatch below.
+
+`NativeHostWindow::minimize_from_wine` in `unix/unix/src/metal/macdrv/native_host.rs` calls `msg_send![super(self), miniaturize: sender]` after Win32 accepts the minimize request. Calling the typed `NSWindow::miniaturize` method would dynamically dispatch back to the subclass override and request minimization again. objc2 0.6 has no typed superclass dispatch in `extern_methods!`. The call uses the framework binding's `Option<&AnyObject>` argument and unit return signature. The audit permits exactly one complete statement in that file and rejects changed selectors, additional statements, duplicates, or relocated calls. The inherited initializer uses a local typed binding.
 
 This is one instance of the general rule in §"Unsafe is a last resort": prefer typed safe wrappers over raw unsafe. `msg_send!` is unsafe surface that already has typed alternatives.
 

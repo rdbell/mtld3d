@@ -3643,6 +3643,45 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
         dev.flags.insert(DeviceFlags::NOT_RESET);
         return D3DERR_INVALIDCALL;
     }
+    // Validate the format and MSAA combination before changing native window ownership.
+    // A rejected exclusive request must leave an AppKit fullscreen host intact.
+    if pp.windowed != 0 && pp.back_buffer_format == 0 {
+        pp.back_buffer_format = crate::direct3d9::adapter_display_format();
+    }
+    // `Reset` re-specifies the swap chain, multisample configuration
+    // included, so resolve it against the device before anything is recreated
+    // and treat a change as a resize: the back buffer and the implicit depth
+    // surface both have to be rebuilt at the new count.
+    let Ok(new_sample_count) = mtld3d_core::multisample::resolve_sample_count(
+        pp.multi_sample_type,
+        pp.multi_sample_quality,
+        pp.back_buffer_format,
+        crate::direct3d9::device_caps_flags(),
+    )
+    .map(|count| u8::try_from(count).expect("sample count ≤ 16 fits u8")) else {
+        warn!(
+            target: LOG_TARGET,
+            "reject Reset: MultiSampleType={} Quality={} on back-buffer format {} is not available",
+            pp.multi_sample_type, pp.multi_sample_quality, pp.back_buffer_format,
+        );
+        dev.flags.insert(DeviceFlags::NOT_RESET);
+        return D3DERR_INVALIDCALL;
+    };
+    // Zero retains the existing "no implicit depth" behavior. Reject every
+    // unsupported nonzero depth format before changing window ownership or
+    // releasing resources, including when only the depth format changes.
+    let new_depth_format = if pp.enable_auto_depth_stencil != 0 {
+        pp.auto_depth_stencil_format
+    } else {
+        0
+    };
+    if new_depth_format != 0
+        && mtld3d_core::format::map_d3d_depth_format(new_depth_format).is_none()
+    {
+        warn!(target: LOG_TARGET, "reject Reset: unsupported AutoDepthStencilFormat {new_depth_format}");
+        dev.flags.insert(DeviceFlags::NOT_RESET);
+        return D3DERR_INVALIDCALL;
+    }
     // Window transition first, then size against the window it produced: a
     // fullscreen or maximized Reset takes its back-buffer size from the client
     // rect, which is only final once the window has moved.
@@ -3651,6 +3690,7 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
     } else {
         pp.device_window
     };
+    let previous_mode = *dev.present_params();
     apply_reset_window_mode(dev, &pp);
     crate::direct3d9::resolve_backbuffer_dims(target_window as u64, &mut pp);
     if pp.windowed != 0 && pp.back_buffer_format == 0 {
@@ -3672,6 +3712,7 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
             pp.back_buffer_width, pp.back_buffer_height, pp.back_buffer_format,
         );
         dev.flags.insert(DeviceFlags::NOT_RESET);
+        apply_reset_window_mode(dev, &previous_mode);
         return D3DERR_INVALIDCALL;
     }
 
@@ -3682,25 +3723,6 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
     pp_in.back_buffer_count = pp.back_buffer_count;
     pp_in.back_buffer_format = pp.back_buffer_format;
 
-    // `Reset` re-specifies the swap chain, multisample configuration
-    // included, so resolve it against the device before anything is recreated
-    // and treat a change as a resize: the back buffer and the implicit depth
-    // surface both have to be rebuilt at the new count.
-    let Ok(new_sample_count) = mtld3d_core::multisample::resolve_sample_count(
-        pp.multi_sample_type,
-        pp.multi_sample_quality,
-        pp.back_buffer_format,
-        crate::direct3d9::device_caps_flags(),
-    )
-    .map(|count| u8::try_from(count).expect("sample count ≤ 16 fits u8")) else {
-        warn!(
-            target: LOG_TARGET,
-            "reject Reset: MultiSampleType={} Quality={} on back-buffer format {} is not available",
-            pp.multi_sample_type, pp.multi_sample_quality, pp.back_buffer_format,
-        );
-        dev.flags.insert(DeviceFlags::NOT_RESET);
-        return D3DERR_INVALIDCALL;
-    };
     let multi_sample_changed = new_sample_count != dev.backbuffer_sample_count;
     dev.set_backbuffer_multi_sample(
         pp.multi_sample_type,
@@ -3710,15 +3732,6 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
     let resized = pp.back_buffer_width != dev.backbuffer_width
         || pp.back_buffer_height != dev.backbuffer_height
         || multi_sample_changed;
-    // Reset adopts the present params' auto depth-stencil configuration: an
-    // enabled flag (re)creates the implicit depth-stencil at the given format,
-    // a disabled flag drops it. This is independent of a resize, so resolve the
-    // target format up front and apply it on both paths below.
-    let new_depth_format = if pp.enable_auto_depth_stencil != 0 {
-        pp.auto_depth_stencil_format
-    } else {
-        0
-    };
     // debug, not info — fires per-frame during a window drag.
     if resized {
         debug!(
@@ -3731,6 +3744,7 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
         dev.depth_stencil_format = new_depth_format;
         if let Err(hr) = reset_recreate_resources(dev, &pp) {
             dev.flags.insert(DeviceFlags::NOT_RESET);
+            apply_reset_window_mode(dev, &previous_mode);
             return hr;
         }
     } else {
@@ -3742,6 +3756,7 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
         // it is unchanged, so the fast path stays fast).
         if let Err(hr) = reconcile_implicit_depth(dev, new_depth_format) {
             dev.flags.insert(DeviceFlags::NOT_RESET);
+            apply_reset_window_mode(dev, &previous_mode);
             return hr;
         }
         // Deliver every op queued since the last Present before the reseed
@@ -3806,7 +3821,21 @@ extern "system" fn device_reset(this: *mut c_void, present_params: *mut c_void) 
 fn apply_reset_window_mode(dev: &mut DeviceInner, pp: &mtld3d_types::D3DPRESENT_PARAMETERS) {
     if pp.windowed != 0 {
         dev.leave_fullscreen();
+        if crate::direct3d9::native_host_enabled() {
+            unix_call(&mut mtld3d_shared::SetNativeHostV1Params {
+                view_handle: dev.view_handle,
+                enabled: 1,
+                reserved: 0,
+            });
+        }
         return;
+    }
+    if crate::direct3d9::native_host_enabled() {
+        unix_call(&mut mtld3d_shared::SetNativeHostV1Params {
+            view_handle: dev.view_handle,
+            enabled: 0,
+            reserved: 0,
+        });
     }
     // A Reset may retarget the device at another window. The one we took over
     // is the one we give back, so a retarget is a leave followed by an enter.

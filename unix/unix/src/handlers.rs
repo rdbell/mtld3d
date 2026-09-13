@@ -129,6 +129,7 @@ pub extern "C" fn get_device_info_handler(args: *mut c_void) -> i32 {
         return -1;
     };
 
+    params.bridge_features = mtld3d_shared::BRIDGE_NATIVE_HOST_V1;
     if let Some((name, registry_id, caps)) = metal::default_device_info() {
         params.registry_id = registry_id;
         params.caps = caps;
@@ -853,5 +854,18 @@ pub extern "C" fn destroy_resources_bulk_handler(args: *mut c_void) -> i32 {
             }
         }
     }
+    STATUS_SUCCESS
+}
+
+/// Configure native ownership while the device retains its Metal view.
+pub extern "C" fn set_native_host_v1_handler(args: *mut c_void) -> i32 {
+    // SAFETY: the caller supplies the versioned operation's parameter block.
+    let Some(params) = (unsafe { InPtr::<mtld3d_shared::SetNativeHostV1Params>::opt(args) }) else {
+        return -1;
+    };
+    if params.reserved != 0 || params.enabled > 1 {
+        return -1;
+    }
+    metal::set_native_host(params.view_handle, params.enabled != 0);
     STATUS_SUCCESS
 }

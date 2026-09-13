@@ -535,3 +535,18 @@ fn df_formats_defaults_on_and_parses_off() {
     assert!(parse(None, "", None).df_formats);
     assert!(!parse(None, "caps.dfFormats = false\n", None).df_formats);
 }
+
+#[test]
+fn native_host_is_opt_in_and_rejects_invalid_values() {
+    assert!(!parse(None, "", None).present_native_host);
+    assert!(parse(None, "present.nativeHost = true", None).present_native_host);
+    assert!(!parse(None, "present.nativeHost = invalid", None).present_native_host);
+    assert!(
+        !parse(
+            None,
+            "present.nativeHost = true\npresent.nativeHost = false",
+            None
+        )
+        .present_native_host
+    );
+}

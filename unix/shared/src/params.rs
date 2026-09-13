@@ -119,7 +119,10 @@ pub struct GetDeviceInfoParams {
     /// answer once per process and derives every device-conditional cap from
     /// it.
     pub caps: DeviceCapsFlags,
-    pub pad0: u32,
+    /// Out: bridge operations supported by this Unix library. Formerly zero padding.
+    ///
+    /// Old libraries leave the caller's zero intact, so new optional calls stay disabled.
+    pub bridge_features: u32,
 }
 
 impl Thunk for GetDeviceInfoParams {
@@ -1202,3 +1205,14 @@ impl Thunk for BlitTextureToBufferParams {
 
 #[cfg(test)]
 mod tests;
+
+/// Versioned opt-in operation; the existing attach wire layout stays unchanged.
+#[repr(C, align(8))]
+pub struct SetNativeHostV1Params {
+    pub view_handle: MetalHandle<NSViewKind>,
+    pub enabled: u32,
+    pub reserved: u32,
+}
+impl Thunk for SetNativeHostV1Params {
+    const CODE: u32 = Thunks::SetNativeHostV1 as u32;
+}

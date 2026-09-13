@@ -51,6 +51,7 @@ const fn dispatch(code: Thunks) -> UnixCallFn {
         Thunks::InitLogger => arp!(handlers::init_logger_handler),
         Thunks::GetDeviceInfo => arp!(handlers::get_device_info_handler),
         Thunks::CreateCommandQueue => arp!(handlers::create_command_queue_handler),
+        Thunks::SetNativeHostV1 => arp!(handlers::set_native_host_v1_handler),
         Thunks::AttachMetalLayer => arp!(handlers::attach_metal_layer_handler),
         Thunks::DestroyCommandQueue => arp!(handlers::destroy_command_queue_handler),
         Thunks::CreateBackbuffer => arp!(handlers::create_backbuffer_handler),

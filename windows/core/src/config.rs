@@ -227,6 +227,8 @@ pub struct Mtld3dConfig {
     /// otherwise-unthrottled free-run. `0` = uncapped. Default: `0`.
     /// File key: `present.maxFps`.
     pub present_max_fps: u32,
+    /// Host windowed presentation in a native macOS window. Default: off.
+    pub present_native_host: bool,
     /// Render resolution as a percentage of the reported back buffer, `MetalFX`-upscaled.
     ///
     /// `100` (the default) renders at the size the game sees, which is an
@@ -334,6 +336,7 @@ impl Default for Mtld3dConfig {
             },
             pagebox_pool_cap_bytes: 128 * 1024 * 1024,
             present_max_fps: 0,
+            present_native_host: false,
             render_scale_percent: 100,
             adapter_spoof: AdapterSpoof::None,
             df_formats: true,
@@ -495,7 +498,7 @@ pub fn log_options(cfg: &Mtld3dConfig) {
     );
     info!(
         target: crate::LOG_TARGET,
-        "config: present.maxFps = {}", cfg.present_max_fps
+        "config: present.maxFps = {}, present.nativeHost = {}", cfg.present_max_fps, cfg.present_native_host
     );
     info!(
         target: crate::LOG_TARGET,
@@ -572,6 +575,7 @@ fn apply(cfg: &mut Mtld3dConfig, source: &str, key: &str, value: &str) {
         "memory.pageboxPoolCapMB" => {
             assign_cap_mb(source, key, value, &mut cfg.pagebox_pool_cap_bytes);
         }
+        "present.nativeHost" => assign_bool(source, key, value, &mut cfg.present_native_host),
         "present.maxFps" => assign_max_fps(source, value, &mut cfg.present_max_fps),
         "render.scale" => assign_render_scale(source, value, &mut cfg.render_scale_percent),
         "adapter.spoof" => assign_adapter_spoof(source, value, &mut cfg.adapter_spoof),

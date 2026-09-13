@@ -8,3 +8,6 @@
 .idea/
 *.swp
 *~
+
+# Python test helper bytecode
+__pycache__/

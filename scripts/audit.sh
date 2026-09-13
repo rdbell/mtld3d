@@ -174,6 +174,40 @@ banned() {
     fi
 }
 
+# Only the native host's superclass miniaturization lacks a typed objc2 binding.
+# Match the complete statement and require exactly one occurrence in its file.
+objc_selectors() {
+    hits=$(awk -v root="$(pwd)" '
+        BEGIN {
+            site = "unix/unix/src/metal/macdrv/native_host.rs"
+            statement = "let _: () = msg_send![super(self), miniaturize: sender];"
+        }
+        FNR == 1 {
+            permitted = FILENAME == site || FILENAME == root "/" site
+            if (permitted) seen = 1
+        }
+        {
+            line = $0
+            sub(/^[ \t]*/, "", line)
+            sub(/[ \t]*$/, "", line)
+            if (line ~ /^\/\//) next
+            if (line !~ /msg_send!|(^|[^_A-Za-z0-9])class!\(|sel!\(/) next
+            if (permitted && line == statement) {
+                count++
+                next
+            }
+            printf "%s:%d: %s\n", FILENAME, FNR, $0
+        }
+        END {
+            if (seen && count != 1)
+                printf "%s: expected exactly one approved superclass dispatch, found %d\n", site, count
+        }
+    ' "$@")
+    if [ -n "$hits" ]; then
+        report 'No raw msg_send! — use typed objc2-* bindings' 'untyped Obj-C selector' "$hits"
+    fi
+}
+
 # A pattern that must not appear in a COMMENT. The inverse of `banned`: these are
 # release-hygiene rules, and the only place they can be broken is the prose.
 banned_in_comments() {
@@ -233,8 +267,7 @@ case "${1:-}" in
         'pub(crate) visibility' "$file"
     banned 'extern "stdcall"' 'extern "system" everywhere, not extern "stdcall"' \
         'extern "stdcall"' "$file"
-    banned 'msg_send!|(^|[^_A-Za-z0-9])class!\(|sel!\(' 'No raw msg_send! — use typed objc2-* bindings' \
-        'untyped Obj-C selector' "$file"
+    objc_selectors "$file"
     banned '(^|[^A-Za-z0-9_])Hash(Map|Set)([^A-Za-z0-9_]|$)' 'FxHash for maps, xxh3 for content' \
         'std HashMap/HashSet: use rustc_hash::FxHashMap / FxHashSet' "$file"
     banned 'DefaultHasher|RandomState' 'FxHash for maps, xxh3 for content' \
@@ -283,8 +316,7 @@ banned 'pub\(crate\)' 'No pub(crate) — use module hierarchy' \
     'pub(crate) visibility' "$@"
 banned 'extern "stdcall"' 'extern "system" everywhere, not extern "stdcall"' \
     'extern "stdcall"' "$@"
-banned 'msg_send!|(^|[^_A-Za-z0-9])class!\(|sel!\(' 'No raw msg_send! — use typed objc2-* bindings' \
-    'untyped Obj-C selector' "$@"
+objc_selectors "$@"
 banned '(^|[^A-Za-z0-9_])Hash(Map|Set)([^A-Za-z0-9_]|$)' 'FxHash for maps, xxh3 for content' \
     'std HashMap/HashSet: use rustc_hash::FxHashMap / FxHashSet' "$@"
 banned 'DefaultHasher|RandomState' 'FxHash for maps, xxh3 for content' \

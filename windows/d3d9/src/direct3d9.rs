@@ -672,6 +672,7 @@ struct CachedDeviceInfo {
     name_len: usize,
     registry_id: u64,
     caps: DeviceCapsFlags,
+    bridge_features: u32,
 }
 
 /// The process-wide `GetDeviceInfo` answer, fetched once on first use.
@@ -684,7 +685,7 @@ fn device_info() -> &'static CachedDeviceInfo {
             name_len: 0,
             registry_id: 0,
             caps: DeviceCapsFlags::empty(),
-            pad0: 0,
+            bridge_features: 0,
         };
         unix_call(&mut params);
         // `name_len` is the untruncated length and can exceed the buffer;
@@ -697,6 +698,7 @@ fn device_info() -> &'static CachedDeviceInfo {
             name_len,
             registry_id: params.registry_id,
             caps: params.caps,
+            bridge_features: params.bridge_features,
         }
     });
     &INFO
@@ -1654,6 +1656,13 @@ fn attach_metal_layer(
     };
     if hwnd != 0 {
         unix_call(&mut layer_params);
+        if native_host_enabled() && pp.windowed != 0 && !layer_params.view_handle.is_null() {
+            unix_call(&mut mtld3d_shared::SetNativeHostV1Params {
+                view_handle: layer_params.view_handle,
+                enabled: 1,
+                reserved: 0,
+            });
+        }
     }
     layer_params
 }
@@ -1909,4 +1918,10 @@ fn create_auto_depth_stencil(
         pp.auto_depth_stencil_format
     );
     Ok(ds_params.texture_handle)
+}
+
+/// Gate optional dispatch on a capability returned through the original wire layout.
+pub fn native_host_enabled() -> bool {
+    crate::config::CONFIG.present_native_host
+        && device_info().bridge_features & mtld3d_shared::BRIDGE_NATIVE_HOST_V1 != 0
 }

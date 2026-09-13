@@ -32,9 +32,9 @@ pub use params::{
     DestroyResourcesBulkParams, EnsureBlitPipelineParams, EnsureClearQuadPipelineParams,
     ExtraColorAttachmentParams, ExtraColorDesc, GetDeviceInfoParams, GetTaskFaultsParams,
     InitLoggerParams, OpenLogParams, PassDescriptor, SetCursorOverlayParams,
-    SetDisplaySyncEnabledParams, StartGpuCaptureParams, StencilFaceParams, StopGpuCaptureParams,
-    SubmitFrameParams, TextureCreateDesc, VertexAttrDesc, VertexBufferLayoutDesc,
-    WaitForGpuRetireParams, WriteLogParams,
+    SetDisplaySyncEnabledParams, SetNativeHostV1Params, StartGpuCaptureParams, StencilFaceParams,
+    StopGpuCaptureParams, SubmitFrameParams, TextureCreateDesc, VertexAttrDesc,
+    VertexBufferLayoutDesc, WaitForGpuRetireParams, WriteLogParams,
 };
 
 #[repr(u32)]
@@ -68,8 +68,12 @@ pub enum Thunks {
     WriteLog,
     OpenLog,
     SetCursorOverlay,
+    SetNativeHostV1,
 }
 
 pub trait Thunk {
     const CODE: u32;
 }
+
+/// The Unix library supports the appended, versioned native-host operation.
+pub const BRIDGE_NATIVE_HOST_V1: u32 = 1;

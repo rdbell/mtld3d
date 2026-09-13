@@ -20,6 +20,7 @@ use objc2_core_graphics::{CGColor, CGColorSpace};
 use crate::{LOG_TARGET, metal::handle::IntoRetained};
 
 mod cursor_overlay;
+mod native_host;
 
 pub use cursor_overlay::{poll_capture_from_present, set_cursor_overlay};
 
@@ -192,6 +193,9 @@ fn is_bound_window(window: usize) -> bool {
 pub fn detach_metal_layer(view_handle: MetalHandle<NSViewKind>) {
     let view_addr =
         usize::try_from(view_handle.raw()).expect("a 64-bit host addresses every view pointer");
+    if native_host::owns(view_addr) {
+        run_on_main_thread_sync(move || native_host::detach(view_addr));
+    }
     let detached = with_bound_display(|bound| {
         let bound_view = view_addr != 0 && bound.view == view_addr;
         if bound_view {
@@ -733,7 +737,11 @@ fn min_present_duration(panel_max_hz: f64, pacing: &PresentPacing) -> f64 {
 ///
 /// The present site consumes it from there.
 fn store_min_present_duration(panel_max_hz: f64, pacing: &PresentPacing) {
-    let seconds = min_present_duration(panel_max_hz, pacing);
+    let effective = PresentPacing {
+        vsync_requested: pacing.vsync_requested,
+        max_fps: native_host::frame_limit(pacing.max_fps),
+    };
+    let seconds = min_present_duration(panel_max_hz, &effective);
     MIN_PRESENT_DURATION_BITS.store(seconds.to_bits(), Ordering::Relaxed);
 }
 
@@ -1044,6 +1052,10 @@ fn run_on_main_thread_sync<F: FnOnce()>(f: F) {
         if let Some(f) = ctx.f.take() {
             f();
         }
+    }
+    if objc2_foundation::MainThreadMarker::new().is_some() {
+        f();
+        return;
     }
     let mut ctx = CallCtx { f: Some(f) };
     // SAFETY: `_dispatch_main_q` is libSystem's main-queue singleton —
@@ -2203,7 +2215,8 @@ fn follow_screen_present_throttle(screen: &objc2_app_kit::NSScreen) {
     if !display_state_is_latched() {
         return;
     }
-    let pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
+    let mut pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
+    pacing.max_fps = native_host::frame_limit(pacing.max_fps);
     let panel_max_hz = screen_max_hz(screen);
     let applied = min_present_duration_sec();
     let Some(seconds) = min_present_duration_change(applied, panel_max_hz, &pacing) else {
@@ -2534,3 +2547,19 @@ fn gamut_from_chromaticities(red_x: f32, green_y: f32) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+
+/// Switch native ownership without changing the existing layer attachment ABI.
+pub fn set_native_host(view: MetalHandle<NSViewKind>, enabled: bool) {
+    let address = usize::try_from(view.raw()).expect("host view address fits usize");
+    if address == 0 || (!enabled && !native_host::owns(address)) {
+        return;
+    }
+    run_on_main_thread_sync(move || {
+        if enabled {
+            // SAFETY: the calling device retains its view through this synchronous call.
+            native_host::attach(unsafe { &*(address as *const objc2_app_kit::NSView) });
+        } else {
+            native_host::detach(address);
+        }
+    });
+}
