@@ -212,6 +212,7 @@ pub fn detach_metal_layer(view_handle: MetalHandle<NSViewKind>) {
     if !detached {
         return;
     }
+    super::interpolation::detach();
     HDR_ACTIVE.store(false, Ordering::Relaxed);
     CURRENT_HEADROOM_BITS.store(1.0_f32.to_bits(), Ordering::Relaxed);
     LAST_LOGGED_HEADROOM_BITS.store(0, Ordering::Relaxed);
@@ -743,6 +744,7 @@ fn min_present_duration(panel_max_hz: f64, pacing: &PresentPacing) -> f64 {
 ///
 /// The present site consumes it from there.
 fn store_min_present_duration(panel_max_hz: f64, pacing: &PresentPacing) {
+    super::interpolation::set_display_hz(panel_max_hz);
     let effective = PresentPacing {
         vsync_requested: pacing.vsync_requested,
         max_fps: native_host::frame_limit(pacing.max_fps),
@@ -2233,6 +2235,7 @@ fn follow_screen_layer_mode(screen: &objc2_app_kit::NSScreen) {
     HDR_ACTIVE.store(mode == LayerMode::Hdr, Ordering::Relaxed);
     COLOR_REFRESH_PENDING.store(false, Ordering::Relaxed);
     COLOR_REVISION.fetch_add(1, Ordering::Relaxed);
+    super::interpolation::invalidate();
     let pf = layer.pixelFormat();
     let wants = layer.wantsExtendedDynamicRangeContent();
     info!(
@@ -2273,6 +2276,7 @@ fn follow_screen_present_throttle(screen: &objc2_app_kit::NSScreen) {
     let mut pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
     pacing.max_fps = native_host::frame_limit(pacing.max_fps);
     let panel_max_hz = screen_max_hz(screen);
+    super::interpolation::set_display_hz(panel_max_hz);
     let applied = min_present_duration_sec();
     let Some(seconds) = min_present_duration_change(applied, panel_max_hz, &pacing) else {
         return;

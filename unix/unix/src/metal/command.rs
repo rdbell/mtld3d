@@ -464,126 +464,132 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             // The processed image is private to presentation; game readbacks use the original.
             let processed = super::picture::encode(&cmd_buf, &present_texture);
             let present_texture = processed.as_deref().unwrap_or(&present_texture);
-            let device = cmd_buf.device();
-            let geometry = PresentGeometry {
-                src: (present_texture.width(), present_texture.height()),
-                dst: (drawable_texture.width(), drawable_texture.height()),
-            };
-            // An enlargement the geometry has not settled on yet takes the
-            // shader rather than building a scaler for a size that is about
-            // to change again. See `SETTLED_PRESENTS`.
-            let route = match present_route(
-                geometry.src,
-                geometry.dst,
-                super::upscale::is_available(&device),
+            if !super::interpolation::should_visit() || !super::interpolation::present(
+                &cmd_buf, present_texture, &layer, &drawable,
             ) {
-                PresentRoute::Upscale if !present_geometry_settled(geometry) => {
-                    PresentRoute::Stretch
-                }
-                route => route,
-            };
-            // Reads what the main thread last published and queues the next
-            // refresh when due. Deriving it here would mean walking
-            // NSView.window on this thread, which is what crashes inside
-            // AppKit while the main thread rebuilds window and screen state.
-            // Polled every present, not only under HDR: the refresh it queues
-            // is also what reconciles the layer with the display the window is
-            // on, and a session that started SDR has to notice a panel with
-            // headroom appearing under it.
-            let current = super::macdrv::current_headroom();
-            // The pointer check rides the present cadence so a system tool
-            // taking the pointer is noticed without a wakeup of its own.
-            super::macdrv::poll_capture_from_present();
-            // The layer follows that display, so its pixel format can change
-            // between two presents. Take the route from the drawable we are
-            // about to write rather than from a latch read a moment earlier: a
-            // float drawable must run the HDR pass whatever the latch says,
-            // and a BGRA8 drawable must not, because the HDR pipelines declare
-            // a float colour attachment.
-            let hdr = drawable_texture.pixelFormat() == MTLPixelFormat::RGBA16Float;
-
-            let presented = if hdr {
-                match route {
-                    PresentRoute::Upscale => encode_hdr_present_upscaled(
-                        &cmd_buf,
-                        present_texture,
-                        &drawable_texture,
-                        current,
-                    ),
-                    // The tone-map pass samples through `filter::linear`, so
-                    // one encode covers both an exact present and a
-                    // minification.
-                    PresentRoute::Copy | PresentRoute::Stretch => {
-                        encode_hdr_present(&cmd_buf, present_texture, &drawable_texture, current)
+                let device = cmd_buf.device();
+                let geometry = PresentGeometry {
+                    src: (present_texture.width(), present_texture.height()),
+                    dst: (drawable_texture.width(), drawable_texture.height()),
+                };
+                // An enlargement the geometry has not settled on yet takes the
+                // shader rather than building a scaler for a size that is about
+                // to change again. See `SETTLED_PRESENTS`.
+                let route = match present_route(
+                    geometry.src,
+                    geometry.dst,
+                    super::upscale::is_available(&device),
+                ) {
+                    PresentRoute::Upscale if !present_geometry_settled(geometry) => {
+                        PresentRoute::Stretch
                     }
-                }
-            } else {
-                match route {
-                    // Extents match: the blit below is exact and cheaper than
-                    // a render pass.
-                    PresentRoute::Copy => false,
-                    // A scaler Metal declines after `is_available` said yes
-                    // still has to write every drawable pixel, so it falls
-                    // through to the stretch rather than to the blit.
-                    PresentRoute::Upscale => {
-                        super::upscale::encode(
+                    route => route,
+                };
+                // Reads what the main thread last published and queues the next
+                // refresh when due. Deriving it here would mean walking
+                // NSView.window on this thread, which is what crashes inside
+                // AppKit while the main thread rebuilds window and screen state.
+                // Polled every present, not only under HDR: the refresh it queues
+                // is also what reconciles the layer with the display the window is
+                // on, and a session that started SDR has to notice a panel with
+                // headroom appearing under it.
+                let current = super::macdrv::current_headroom();
+                // The pointer check rides the present cadence so a system tool
+                // taking the pointer is noticed without a wakeup of its own.
+                super::macdrv::poll_capture_from_present();
+                // The layer follows that display, so its pixel format can change
+                // between two presents. Take the route from the drawable we are
+                // about to write rather than from a latch read a moment earlier: a
+                // float drawable must run the HDR pass whatever the latch says,
+                // and a BGRA8 drawable must not, because the HDR pipelines declare
+                // a float colour attachment.
+                let hdr = drawable_texture.pixelFormat() == MTLPixelFormat::RGBA16Float;
+
+                let presented = if hdr {
+                    match route {
+                        PresentRoute::Upscale => encode_hdr_present_upscaled(
                             &cmd_buf,
-                            &device,
                             present_texture,
                             &drawable_texture,
-                            MTLFXSpatialScalerColorProcessingMode::Perceptual,
-                        ) || encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
+                            current,
+                        ),
+                        // The tone-map pass samples through `filter::linear`, so
+                        // one encode covers both an exact present and a
+                        // minification.
+                        PresentRoute::Copy | PresentRoute::Stretch => {
+                            encode_hdr_present(&cmd_buf, present_texture, &drawable_texture, current)
+                        }
                     }
-                    PresentRoute::Stretch => {
-                        encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
-                    }
-                }
-            };
-            if !presented {
-                if hdr {
-                    // No blit fallback on the HDR layer: a `copyFromTexture`
-                    // from the BGRA8 backbuffer into an RGBA16Float drawable
-                    // is invalid API use, so Metal kills the command buffer
-                    // and the drawable is presented with nothing written,
-                    // which reads as magenta noise. A defined black frame is
-                    // the only correct fallback here.
-                    mtld3d_shared::log_once_warn!(
-                        target: LOG_TARGET,
-                        "present: HDR present pass failed to encode {}x{} → {}x{}; \
-                         presenting a cleared drawable instead",
-                        geometry.src.0, geometry.src.1, geometry.dst.0, geometry.dst.1,
-                    );
-                    clear_drawable(&cmd_buf, &drawable_texture);
                 } else {
-                    encode_present_blit(
-                        &cmd_buf,
-                        present_texture,
-                        &drawable_texture,
-                        route,
-                        params.present_texture.raw(),
-                    );
+                    match route {
+                        // Extents match: the blit below is exact and cheaper than
+                        // a render pass.
+                        PresentRoute::Copy => false,
+                        // A scaler Metal declines after `is_available` said yes
+                        // still has to write every drawable pixel, so it falls
+                        // through to the stretch rather than to the blit.
+                        PresentRoute::Upscale => {
+                            super::upscale::encode(
+                                &cmd_buf,
+                                &device,
+                                present_texture,
+                                &drawable_texture,
+                                MTLFXSpatialScalerColorProcessingMode::Perceptual,
+                            ) || encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
+                        }
+                        PresentRoute::Stretch => {
+                            encode_present_copy(&cmd_buf, present_texture, &drawable_texture)
+                        }
+                    }
+                };
+                if !presented {
+                    if hdr {
+                        // No blit fallback on the HDR layer: a `copyFromTexture`
+                        // from the BGRA8 backbuffer into an RGBA16Float drawable
+                        // is invalid API use, so Metal kills the command buffer
+                        // and the drawable is presented with nothing written,
+                        // which reads as magenta noise. A defined black frame is
+                        // the only correct fallback here.
+                        mtld3d_shared::log_once_warn!(
+                            target: LOG_TARGET,
+                            "present: HDR present pass failed to encode {}x{} → {}x{}; \
+                             presenting a cleared drawable instead",
+                            geometry.src.0, geometry.src.1, geometry.dst.0, geometry.dst.1,
+                        );
+                        clear_drawable(&cmd_buf, &drawable_texture);
+                    } else {
+                        encode_present_blit(
+                            &cmd_buf,
+                            present_texture,
+                            &drawable_texture,
+                            route,
+                            params.present_texture.raw(),
+                        );
+                    }
+                }
+
+                mtld3d_shared::crumb!("submit:present", params.drawable_wait_ns);
+                // Throttle presents to `1/panel_max_hz` when the guest asked
+                // for vsync (PE-side `D3DPRESENT_INTERVAL_*` mapping). On a
+                // ProMotion panel the system adapts the panel rate to whatever
+                // sub-max cadence we sustain under the cap, so fractional
+                // production rates display at their actual rate. `0.0` means
+                // free-run (D3DPRESENT_INTERVAL_IMMEDIATE) — drop the throttle.
+                let drawable_obj = ProtocolObject::from_ref(&*drawable);
+                let min_duration = super::macdrv::min_present_duration_sec();
+                if min_duration > 0.0 {
+                    cmd_buf.presentDrawable_afterMinimumDuration(drawable_obj, min_duration);
+                } else {
+                    cmd_buf.presentDrawable(drawable_obj);
+                }
+                // Debug and trace output only, so the per-frame block allocation
+                // and handler registration are skipped when the target is off.
+                if log::log_enabled!(target: PRESENT_LOG_TARGET, log::Level::Debug) {
+                    register_presented_probe(&drawable, params.submit_seq, params.drawable_wait_ns);
                 }
             }
-
-            mtld3d_shared::crumb!("submit:present", params.drawable_wait_ns);
-            // Throttle presents to `1/panel_max_hz` when the guest asked
-            // for vsync (PE-side `D3DPRESENT_INTERVAL_*` mapping). On a
-            // ProMotion panel the system adapts the panel rate to whatever
-            // sub-max cadence we sustain under the cap, so fractional
-            // production rates display at their actual rate. `0.0` means
-            // free-run (D3DPRESENT_INTERVAL_IMMEDIATE) — drop the throttle.
-            let drawable_obj = ProtocolObject::from_ref(&*drawable);
-            let min_duration = super::macdrv::min_present_duration_sec();
-            if min_duration > 0.0 {
-                cmd_buf.presentDrawable_afterMinimumDuration(drawable_obj, min_duration);
-            } else {
-                cmd_buf.presentDrawable(drawable_obj);
-            }
-            // Debug and trace output only, so the per-frame block allocation
-            // and handler registration are skipped when the target is off.
-            if log::log_enabled!(target: PRESENT_LOG_TARGET, log::Level::Debug) {
-                register_presented_probe(&drawable, params.submit_seq, params.drawable_wait_ns);
-            }
+        } else {
+            super::interpolation::invalidate();
         }
     }
 
@@ -1117,7 +1123,7 @@ fn encode_hdr_present(
 ///
 /// Returns `false` (with an error at the call site of `ensure_resources`)
 /// if pipeline creation failed.
-fn encode_present_copy(
+pub fn encode_present_copy(
     cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     src: &ProtocolObject<dyn MTLTexture>,
     dst: &ProtocolObject<dyn MTLTexture>,

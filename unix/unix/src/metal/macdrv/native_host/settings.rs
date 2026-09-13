@@ -93,7 +93,7 @@ define_class!(
             let settings = host.settings.borrow();
             let Some(settings) = settings.as_ref() else { return };
             let status = settings.picture.changed(sender);
-            settings.status.setStringValue(&NSString::from_str(status));
+            settings.status.setStringValue(&NSString::from_str(&status));
         }
     }
 
@@ -199,6 +199,9 @@ fn show() {
     let panel = {
         let mut slot = host.settings.borrow_mut();
         let settings = slot.get_or_insert_with(|| Settings::new(host.window.mtm()));
+        if crate::metal::interpolation::settings().0 {
+            settings.status.setStringValue(&NSString::from_str(&crate::metal::interpolation::status()));
+        }
         settings.panel.clone()
     };
     panel.makeKeyAndOrderFront(None);
@@ -210,7 +213,7 @@ impl Settings {
         let panel = {
             NSPanel::initWithContentRect_styleMask_backing_defer(
                 NSPanel::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(620.0, 640.0)),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(620.0, 760.0)),
                 NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
@@ -222,7 +225,7 @@ impl Settings {
         let content = panel.contentView().expect("a new panel has a content view");
         let label = NSTextField::labelWithString(&NSString::from_str("Frame limit"), mtm);
         label.setFrame(NSRect::new(
-            NSPoint::new(24.0, 586.0),
+            NSPoint::new(24.0, 706.0),
             NSSize::new(150.0, 24.0),
         ));
         let pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
@@ -231,7 +234,7 @@ impl Settings {
             mtm,
         );
         value.setFrame(NSRect::new(
-            NSPoint::new(208.0, 584.0),
+            NSPoint::new(208.0, 704.0),
             NSSize::new(100.0, 26.0),
         ));
         let note = NSTextField::labelWithString(
@@ -241,7 +244,7 @@ impl Settings {
             mtm,
         );
         note.setFrame(NSRect::new(
-            NSPoint::new(24.0, 534.0),
+            NSPoint::new(24.0, 654.0),
             NSSize::new(576.0, 48.0),
         ));
         let status = NSTextField::labelWithString(
@@ -249,8 +252,8 @@ impl Settings {
             mtm,
         );
         status.setFrame(NSRect::new(
-            NSPoint::new(24.0, 20.0),
-            NSSize::new(576.0, 24.0),
+            NSPoint::new(24.0, 8.0),
+            NSSize::new(576.0, 40.0),
         ));
         for field in [&label, &value, &note, &status] {
             // SAFETY: all views live on this AppKit thread and the content view retains them.
@@ -265,7 +268,7 @@ impl Settings {
             let frame = host.window.frame();
             panel.setFrameOrigin(NSPoint::new(
                 frame.origin.x + (frame.size.width - 620.0) / 2.0,
-                frame.origin.y + (frame.size.height - 668.0) / 2.0,
+                frame.origin.y + (frame.size.height - 788.0) / 2.0,
             ));
         } else {
             panel.center();

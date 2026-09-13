@@ -1,0 +1,62 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct Vertex { float4 position [[position]]; float2 uv; };
+vertex Vertex interpolation_vs(uint id [[vertex_id]]) {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return {float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0, 1), uv};
+}
+
+constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge, filter::linear);
+float luminance(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+// Search current -> previous, in source-image pixels. Equal-cost candidates
+// prefer zero/small motion, so static flat regions do not invent movement.
+fragment float2 interpolation_search(Vertex in [[stage_in]],
+    texture2d<float> current [[texture(0)]], texture2d<float> previous [[texture(1)]]) {
+    float2 pixel = 1.0 / float2(current.get_width(), current.get_height());
+    float best = INFINITY;
+    float2 motion = 0;
+    for (int y = -4; y <= 4; ++y) {
+        for (int x = -4; x <= 4; ++x) {
+            float2 candidate = float2(x, y) * 8.0;
+            float error = dot(candidate, candidate) * 0.000002;
+            for (int by = -1; by <= 1; ++by) {
+                for (int bx = -1; bx <= 1; ++bx) {
+                    float2 uv = in.uv + float2(bx, by) * pixel * 3.0;
+                    float a = luminance(current.sample(linear_sampler, uv).rgb);
+                    float b = luminance(previous.sample(linear_sampler, uv + candidate * pixel).rgb);
+                    error += abs(a - b);
+                }
+            }
+            if (error < best) { best = error; motion = candidate; }
+        }
+    }
+    // One small refinement around the coarse match. The fixed search bounds
+    // bound cost even during large effects or a scene transition.
+    float2 coarse = motion;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float2 candidate = coarse + float2(x, y) * 2.0;
+            float error = dot(candidate, candidate) * 0.000002;
+            for (int by = -1; by <= 1; ++by) {
+                for (int bx = -1; bx <= 1; ++bx) {
+                    float2 uv = in.uv + float2(bx, by) * pixel * 3.0;
+                    error += abs(luminance(current.sample(linear_sampler, uv).rgb)
+                        - luminance(previous.sample(linear_sampler, uv + candidate * pixel).rgb));
+                }
+            }
+            if (error < best) { best = error; motion = candidate; }
+        }
+    }
+    // Unmatched content, cuts and flashes have no trustworthy correspondence.
+    // This only suppresses dubious motion; it is not scene-cut detection.
+    return best < 0.9 ? motion : float2(0);
+}
+
+fragment float2 interpolation_motion(Vertex in [[stage_in]], texture2d<float> grid [[texture(0)]]) {
+    return grid.sample(linear_sampler, in.uv).xy;
+}
+
+// Explicit virtual plane for the image-only experiment. This is not scene Z.
+fragment float interpolation_depth() { return 0.5; }

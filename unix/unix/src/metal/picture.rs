@@ -86,6 +86,7 @@ pub fn snapshot() -> Picture {
 
 /// Clamp the session inputs before publishing a complete frame snapshot.
 pub fn update(mut value: Picture) {
+    super::interpolation::invalidate();
     fn bounded(value: f32, low: f32, high: f32, default: f32) -> f32 {
         if value.is_finite() {
             value.clamp(low, high)

@@ -350,7 +350,7 @@ fn create(device: &ProtocolObject<dyn MTLDevice>) -> Option<PresentPipelines> {
     })
 }
 
-fn build_pipeline(
+pub fn build_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
     vs: &ProtocolObject<dyn MTLFunction>,
     ps: &ProtocolObject<dyn MTLFunction>,
