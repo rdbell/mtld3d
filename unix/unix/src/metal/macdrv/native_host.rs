@@ -30,6 +30,7 @@ use super::MACDRV_LIB;
 use crate::LOG_TARGET;
 
 mod settings;
+mod preferences;
 
 static HOST_VIEW: AtomicUsize = AtomicUsize::new(0);
 
@@ -220,6 +221,7 @@ pub fn attach(view: &NSView) {
         warn!(target: LOG_TARGET, "native host: child or fullscreen window is unsupported; keeping Wine window");
         return;
     }
+    preferences::restore(mtm);
     let content = child.contentRectForFrameRect(child.frame());
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable

@@ -7,7 +7,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
-use super::SettingsDelegate;
+use super::{SettingsDelegate, preferences};
 use crate::metal::{
     macdrv,
     picture::{self, Picture},
@@ -83,20 +83,24 @@ impl PictureControls {
         reset.setFrame(rect(24.0, 137.0, 150.0, 30.0));
         content.addSubview(&reset);
         let note = NSTextField::labelWithString(&NSString::from_str(
-            "Effects also affect game text, menus and nameplates.\nSharpening and bloom are off at 0. Neutral contrast/saturation: 1.\nAccurate colors preserves sRGB intent; off uses the existing vivid mode.\nAll changes last for this game session only."
+            "Effects also affect game text, menus and nameplates.\nSharpening and bloom are off at 0. Neutral contrast/saturation: 1.\nAccurate colors preserves sRGB intent; off uses the existing vivid mode.\nChanges save automatically for future launches."
         ), mtm);
         note.setFrame(rect(24.0, 51.0, 576.0, 78.0));
         content.addSubview(&note);
         Self { rows, fxaa, hdr, accurate, reset }
     }
 
-    pub fn changed(&self, sender: &NSControl) -> &'static str {
+    pub fn changed(&self, sender: &NSControl) -> String {
         if sender.tag() == RESET_TAG {
             self.set_values(Picture::neutral());
         }
         if sender.tag() == DISPLAY_TAG {
             macdrv::set_session_display(sender.mtm(), checked(&self.hdr), checked(&self.accurate));
-            return macdrv::session_display_status();
+            return if preferences::save_display(checked(&self.hdr), checked(&self.accurate)) {
+                format!("Saved. {}", macdrv::session_display_status())
+            } else {
+                "Display settings applied, but preferences could not be saved.".into()
+            };
         }
         let values: Vec<_> = self.rows.iter().map(|row| {
             // Bounds come from the slider constructor and are clamped again by picture::update.
@@ -109,7 +113,11 @@ impl PictureControls {
             temperature: values[4], bloom: values[5], bloom_threshold: values[6], bloom_radius: values[7],
             fxaa: checked(&self.fxaa),
         });
-        "Picture settings applied for this session."
+        if preferences::save_picture() {
+            "Picture settings saved for future launches.".into()
+        } else {
+            "Picture settings applied, but preferences could not be saved.".into()
+        }
     }
 
     fn set_values(&self, value: Picture) {

@@ -1,9 +1,11 @@
 # Native picture controls
 
 Command-comma opens Graphics Settings when the native game window is enabled.
-The controls apply to the current process session. Closing the panel or
-resetting the D3D device preserves them; restarting the game restores the
-startup configuration and neutral effects. No launcher settings are rewritten.
+The controls save automatically across launches using macOS preferences.
+Closing the panel or resetting the D3D device preserves the live values; the
+next native game window restores saved choices without reopening Settings.
+Unsaved values inherit startup configuration and neutral effects. No launcher
+settings are rewritten. See [persistence details](PERSISTENT-GRAPHICS.md).
 
 | Control | Range and initial value | Behavior |
 | --- | --- | --- |

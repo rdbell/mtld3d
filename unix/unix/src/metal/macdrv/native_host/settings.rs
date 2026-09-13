@@ -19,7 +19,7 @@ use objc2_foundation::{
 
 use super::{
     super::{PRESENT_PACING_BITS, set_display_sync_enabled, unpack_pacing},
-    FRAME_LIMIT, current, frame_limit,
+    FRAME_LIMIT, current, frame_limit, preferences,
 };
 
 mod picture_controls;
@@ -75,14 +75,13 @@ define_class!(
             FRAME_LIMIT.store(value, Ordering::Relaxed);
             let pacing = unpack_pacing(PRESENT_PACING_BITS.load(Ordering::Relaxed));
             set_display_sync_enabled(mtld3d_shared::MetalHandle::NULL, &pacing);
-            settings
-                .status
-                .setStringValue(&NSString::from_str(if value == 0 {
-                    "Frame limit removed for this session."
-                } else {
-                    "Frame limit applied for this session."
-                }));
-            log::info!(target: crate::LOG_TARGET, "native host: session frame limit set to {value}");
+            let message = if preferences::save_frame(value) {
+                "Frame limit saved for future launches."
+            } else {
+                "Frame limit applied, but preferences could not be saved."
+            };
+            settings.status.setStringValue(&NSString::from_str(message));
+            log::info!(target: crate::LOG_TARGET, "native host: frame limit set to {value}");
         }
     }
 
@@ -93,7 +92,7 @@ define_class!(
             let settings = host.settings.borrow();
             let Some(settings) = settings.as_ref() else { return };
             let status = settings.picture.changed(sender);
-            settings.status.setStringValue(&NSString::from_str(status));
+            settings.status.setStringValue(&NSString::from_str(&status));
         }
     }
 
@@ -245,7 +244,7 @@ impl Settings {
             NSSize::new(576.0, 48.0),
         ));
         let status = NSTextField::labelWithString(
-            &NSString::from_str("Changes apply to the current session."),
+            &NSString::from_str("Changes save automatically for future launches."),
             mtm,
         );
         status.setFrame(NSRect::new(
