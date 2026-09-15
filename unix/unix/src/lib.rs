@@ -7,6 +7,7 @@ mod crash;
 mod handlers;
 mod log_file;
 mod metal;
+mod qos;
 
 /// `log` target used by every call inside this crate.
 ///

@@ -29,8 +29,8 @@ use objc2_foundation::{
 use super::MACDRV_LIB;
 use crate::LOG_TARGET;
 
-mod settings;
 mod preferences;
+mod settings;
 
 static HOST_VIEW: AtomicUsize = AtomicUsize::new(0);
 
@@ -394,4 +394,9 @@ pub fn frame_limit(configured: u32) -> u32 {
 /// Cheap ownership check for teardown, without involving the main thread when disabled.
 pub fn owns(view: usize) -> bool {
     view != 0 && HOST_VIEW.load(Ordering::Acquire) == view
+}
+
+/// Match a host notification to the active binding. Main thread only.
+pub fn is_host_window(window: usize) -> bool {
+    current().is_some_and(|host| Retained::as_ptr(&host.window) as usize == window)
 }

@@ -4977,3 +4977,48 @@ fn get_render_target_data_from_a_cube_face_reads_that_face() {
         "face 0 still reads its own fill"
     );
 }
+
+#[test]
+fn successive_submits_preserve_up_data_across_readback_continuations() {
+    let h = Harness::new();
+    let targets = [
+        h.create_render_target(64, 64, D3DFMT_A8R8G8B8),
+        h.create_render_target(64, 64, D3DFMT_A8R8G8B8),
+        h.create_render_target(64, 64, D3DFMT_A8R8G8B8),
+    ];
+    let backbuffer = h.render_target(0);
+    assert_eq!(h.clear_texture(0), 0);
+    assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), 0);
+    assert_eq!(h.set_render_state(D3DRS_ZENABLE, 0), 0);
+    assert_eq!(h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE), 0);
+    h.select_diffuse_stage(0);
+    let colors = [RED, GREEN, BLUE, WHITE];
+    let mut expected = [BLACK; 3];
+    for frame in 0..12 {
+        let slot = frame % targets.len();
+        let color = colors[frame % colors.len()];
+        expected[slot] = color;
+        assert_eq!(h.set_render_target(0, &targets[slot]), 0);
+        h.render_once(BLACK, |d| {
+            for _ in 0..768 {
+                let mut vertices = fullscreen_triangle(color);
+                assert_eq!(d.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &vertices), 0);
+                // The API must have captured these bytes before it returned.
+                for vertex in &mut vertices {
+                    vertex.color = BLACK;
+                    vertex.x = 8.0;
+                }
+                std::hint::black_box(&vertices);
+            }
+        });
+        // Alternate queued Presents with a synchronous readback continuation.
+        if frame % 4 == 3 {
+            assert_eq!(h.read_pixel(32, 32), color, "frame {frame}");
+        }
+    }
+    for (target, color) in targets.iter().zip(expected) {
+        assert_eq!(h.set_render_target(0, target), 0);
+        assert_eq!(h.read_pixel(32, 32), color, "retained target contents");
+    }
+    assert_eq!(h.set_render_target(0, &backbuffer), 0);
+}

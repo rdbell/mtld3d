@@ -209,7 +209,14 @@ pub fn wait_for_gpu_retire(target_seq: u64, coherent_seq_ptr: u64, failed_submit
         return;
     };
     mtld3d_shared::crumb!("gpuretirebeg", target_seq, atomic.load(Ordering::Acquire));
+    let wait_started = std::time::Instant::now();
     cmdbuf.waitUntilCompleted();
+    let waited = wait_started.elapsed();
+    if waited >= std::time::Duration::from_millis(250) {
+        log::warn!(target: PRESENT_LOG_TARGET,
+            "GPU retirement stalled: seq={target_seq} wait_ms={} hidden={}",
+            waited.as_millis(), super::macdrv::window_occluded());
+    }
     mtld3d_shared::crumb!("gpuretireend", target_seq);
     // Record the abort before the retirement bump: both stores are
     // `Release`, so a PE-side `Acquire` load of `coherent_seq` that sees
@@ -391,6 +398,9 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             return true;
         };
 
+        // Schedule display and visibility reconciliation even when this present
+        // is suppressed. Recovery must not depend on acquiring a drawable first.
+        let current = super::macdrv::current_headroom();
         let drawable_opt = if super::macdrv::window_occluded() {
             // Window fully occluded: the compositor isn't recycling drawables,
             // so `nextDrawable` would block its full timeout for nothing that
@@ -408,10 +418,18 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
             // be composited at the old size, which means rescaled.
             super::macdrv::sync_drawable_size(&layer);
             mtld3d_shared::crumb!("submit:nextdraw", params.present_layer.raw());
+            let wait_started = std::time::Instant::now();
             let drawable = {
                 let _wait = NanosSetTimer::start(&raw mut params.drawable_wait_ns);
                 layer.nextDrawable()
             };
+            let waited = wait_started.elapsed();
+            if waited >= std::time::Duration::from_millis(250) {
+                log::warn!(target: PRESENT_LOG_TARGET,
+                    "drawable acquisition stalled: seq={} wait_ms={} acquired={} hidden={}",
+                    params.submit_seq, waited.as_millis(), drawable.is_some(),
+                    super::macdrv::window_occluded());
+            }
             if drawable.is_none() {
                 // Visible, yet no drawable within the timeout — a rare
                 // compositor stall, or an occlusion signal that hasn't
@@ -482,15 +500,6 @@ pub fn submit_frame(params: &mut SubmitFrameParams) -> bool {
                 }
                 route => route,
             };
-            // Reads what the main thread last published and queues the next
-            // refresh when due. Deriving it here would mean walking
-            // NSView.window on this thread, which is what crashes inside
-            // AppKit while the main thread rebuilds window and screen state.
-            // Polled every present, not only under HDR: the refresh it queues
-            // is also what reconciles the layer with the display the window is
-            // on, and a session that started SDR has to notice a panel with
-            // headroom appearing under it.
-            let current = super::macdrv::current_headroom();
             // The pointer check rides the present cadence so a system tool
             // taking the pointer is noticed without a wakeup of its own.
             super::macdrv::poll_capture_from_present();

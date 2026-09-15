@@ -59,8 +59,8 @@ static COLOR_REVISION: AtomicU64 = AtomicU64::new(0);
 /// Whether the bound window is currently fully occluded (covered or minimised).
 ///
 /// I.e. its `NSWindow` occlusion state lacks the `Visible` bit. Seeded at
-/// `AttachMetalLayer` and updated by an `NSWindowDidChangeOcclusionState`
-/// observer (both on the main thread); read by `submit_frame` per present
+/// `AttachMetalLayer` and refreshed on window and Space notifications and
+/// during the periodic main-thread display refresh; read by `submit_frame` per present
 /// to skip the `nextDrawable` acquire while nothing reaches the screen.
 /// Relaxed is enough — a one-frame lag at the transition is harmless and
 /// bounded by the retained `allowsNextDrawableTimeout` safety valve.
@@ -305,7 +305,7 @@ pub fn window_occluded() -> bool {
 /// thread — `NSView`/`NSWindow` access and the notification center are
 /// main-thread affairs, mirroring [`configure_metal_layer`]'s posture.
 fn install_occlusion_tracking(view: *mut c_void) {
-    use objc2_app_kit::{NSView, NSWindowOcclusionState};
+    use objc2_app_kit::NSView;
 
     let view_addr = view as usize;
     // The headroom refresh walks this same view, and stores it here rather
@@ -327,10 +327,7 @@ fn install_occlusion_tracking(view: *mut c_void) {
         };
         let window_addr = Retained::as_ptr(&window) as usize;
         with_bound_display(|bound| bound.window = window_addr);
-        let occluded = !window
-            .occlusionState()
-            .contains(NSWindowOcclusionState::Visible);
-        WINDOW_OCCLUDED.store(occluded, Ordering::Relaxed);
+        refresh_window_visibility(view);
         install_occlusion_observer_once();
         // SAFETY: inside the main-thread dispatch above.
         let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
@@ -594,7 +591,8 @@ fn install_occlusion_observer_once() {
 
     use block2::RcBlock;
     use objc2_app_kit::{
-        NSWindow, NSWindowDidChangeOcclusionStateNotification, NSWindowOcclusionState,
+        NSWindowDidChangeOcclusionStateNotification, NSWorkspace,
+        NSWorkspaceActiveSpaceDidChangeNotification,
     };
     use objc2_foundation::{NSNotification, NSNotificationCenter};
 
@@ -611,17 +609,12 @@ fn install_occlusion_observer_once() {
                 return;
             };
             let object_ptr = Retained::as_ptr(&object) as usize;
-            if !is_bound_window(object_ptr) {
+            if !is_bound_window(object_ptr) && !native_host::is_host_window(object_ptr) {
                 return;
             }
-            // SAFETY: `object` is the live window that posted the notification;
-            // its pointer matches the window bound at attach, so it is our
-            // `NSWindow`, and it stays retained for this call. Occlusion
-            // notifications are delivered on the main thread, where the
-            // `occlusionState` read is valid.
-            let window = unsafe { &*(object_ptr as *const NSWindow) };
-            let occluded = !window.occlusionState().contains(NSWindowOcclusionState::Visible);
-            WINDOW_OCCLUDED.store(occluded, Ordering::Relaxed);
+            if let Some(view) = retain_bound_view() {
+                refresh_window_visibility(&view);
+            }
         });
 
         let center = NSNotificationCenter::defaultCenter();
@@ -635,11 +628,50 @@ fn install_occlusion_observer_once() {
             center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
         };
         core::mem::forget(token);
+        // Space changes use the workspace center, not the default center.
+        // Resolve the current binding when delivered so teardown and reattach
+        // cannot leave an observer holding a released window.
+        let space_block = RcBlock::new(|_: NonNull<NSNotification>| {
+            run_on_main_thread_async(refresh_headroom_on_main);
+        });
+        let workspace = NSWorkspace::sharedWorkspace();
+        // SAFETY: the framework owns the notification name; the process-lifetime
+        // block captures no objects and dispatches AppKit access to the main thread.
+        let space_token = unsafe {
+            workspace.notificationCenter().addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceActiveSpaceDidChangeNotification), None, None, &space_block,
+            )
+        };
+        core::mem::forget(space_token);
         info!(
             target: LOG_TARGET,
             "present: installed NSWindowDidChangeOcclusionState observer (occluded presents skip nextDrawable)",
         );
     });
+}
+
+/// Reconcile presentation eligibility against the live window. Main thread only.
+fn refresh_window_visibility(view: &objc2_app_kit::NSView) {
+    use objc2_app_kit::NSWindowOcclusionState;
+
+    let Some(window) = view.window() else { return };
+    let visible = window.isVisible();
+    let on_space = window.isOnActiveSpace();
+    let exposed = window
+        .occlusionState()
+        .contains(NSWindowOcclusionState::Visible);
+    let parent_hidden = window.parentWindow().is_some_and(|parent| {
+        !parent.isVisible() || !parent.isOnActiveSpace() || parent.isMiniaturized()
+    });
+    // Occlusion is the compositor's presentation signal. Space membership and
+    // parent state can lag exposure during transitions; keep them diagnostic
+    // rather than suppressing an already-exposed surface until they settle.
+    let hidden = !exposed;
+    if WINDOW_OCCLUDED.swap(hidden, Ordering::Relaxed) != hidden {
+        info!(target: LOG_TARGET,
+            "present: visibility hidden={hidden} window={} visible={visible} active_space={on_space} exposed={exposed} parent_hidden={parent_hidden}",
+            window.windowNumber());
+    }
 }
 
 /// Minimum seconds between presents passed to `presentDrawable:afterMinimumDuration:`.
@@ -1310,7 +1342,10 @@ pub fn session_display() -> (bool, bool) {
 
 /// Apply the native panel's display choices on the AppKit thread.
 pub fn set_session_display(_mtm: objc2::MainThreadMarker, hdr: bool, accurate: bool) {
-    SESSION_DISPLAY.store(u32::from(hdr) | (u32::from(accurate) << 1), Ordering::Relaxed);
+    SESSION_DISPLAY.store(
+        u32::from(hdr) | (u32::from(accurate) << 1),
+        Ordering::Relaxed,
+    );
     HDR_ENABLE_REQUESTED.store(hdr, Ordering::Relaxed);
     let policy = if accurate {
         ColorSpacePolicy::Accurate
@@ -1763,6 +1798,7 @@ fn refresh_headroom_on_main() {
     let Some(view_obj) = retain_bound_view() else {
         return;
     };
+    refresh_window_visibility(&view_obj);
     // SAFETY: we are on the main thread (dispatched to the main queue), where
     // NSScreen's main-thread-only class annotation is satisfied for real.
     let mtm = unsafe { MainThreadMarker::new_unchecked() };

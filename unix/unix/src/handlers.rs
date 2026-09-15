@@ -155,6 +155,7 @@ pub extern "C" fn get_device_info_handler(args: *mut c_void) -> i32 {
 }
 
 pub extern "C" fn create_command_queue_handler(args: *mut c_void) -> i32 {
+    crate::qos::observe(&crate::qos::Role::DeviceApi);
     // SAFETY: unix-call handler params; PE side passes *mut CreateCommandQueueParams.
     let Some(mut params) = (unsafe { InPtrMut::<CreateCommandQueueParams>::opt(args) }) else {
         return -1;
@@ -546,6 +547,7 @@ pub extern "C" fn compile_shader_library_handler(args: *mut c_void) -> i32 {
 }
 
 pub extern "C" fn submit_frame_handler(args: *mut c_void) -> i32 {
+    crate::qos::observe(&crate::qos::Role::Submit);
     // SAFETY: unix-call handler params; PE side passes *mut SubmitFrameParams.
     let Some(mut params) = (unsafe { InPtrMut::<SubmitFrameParams>::opt(args) }) else {
         return -1;
@@ -559,6 +561,7 @@ pub extern "C" fn submit_frame_handler(args: *mut c_void) -> i32 {
 }
 
 pub extern "C" fn blit_texture_to_buffer_handler(args: *mut c_void) -> i32 {
+    crate::qos::observe(&crate::qos::Role::ReadbackApi);
     // SAFETY: unix-call handler params; PE side passes *const BlitTextureToBufferParams.
     let Some(params) = (unsafe { InPtr::<BlitTextureToBufferParams>::opt(args.cast()) }) else {
         return -1;
