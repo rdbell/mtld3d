@@ -1,16 +1,19 @@
 --- a/dlls/winemac.drv/cocoa_window.m
 +++ b/dlls/winemac.drv/cocoa_window.m
-@@ -1,3 +1,4 @@
+@@ -19,6 +19,8 @@
+  */
+ 
+ #include "config.h"
++
 +#import <objc/runtime.h>
- /*
-  * MACDRV Cocoa window code
-  *
-@@ -391,9 +392,15 @@
-     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
+ 
+ #define GL_SILENCE_DEPRECATION
+ #import <CoreVideo/CoreVideo.h>
+@@ -392,8 +394,14 @@
  
  @end
-+
  
++
 +/* Native-host contract: this selector bypasses the request-first minimize action. */
 +@interface NSWindow (MTLD3DNativeHost)
 +- (void) nativeHostMiniaturizeFromWine:(id)sender;
@@ -21,16 +24,15 @@
  
  @property (readwrite, nonatomic) BOOL disabled;
  @property (readwrite, nonatomic) BOOL noForeground;
-@@ -1002,7 +1009,18 @@
- @implementation WineWindow
+@@ -1010,6 +1018,17 @@
  
      static WineWindow* causing_becomeKeyWindow;
-+
+ 
 +    - (NSWindow*) nativeHostWindow
 +    {
 +        return objc_getAssociatedObject(self, @selector(nativeHostWindow));
 +    }
- 
++
 +    - (void) setNativeHostWindow:(NSWindow*)host
 +    {
 +        objc_setAssociatedObject(self, @selector(nativeHostWindow), host, OBJC_ASSOCIATION_ASSIGN);
@@ -40,7 +42,7 @@
      @synthesize disabled, noForeground, preventsAppActivation, floating, fullscreen, fakingClose, closing, latentParentWindow, hwnd, queue;
      @synthesize drawnSinceShown;
      @synthesize shapeChangedSinceLastDraw;
-@@ -1185,6 +1203,7 @@
+@@ -1192,6 +1211,7 @@
          NSUInteger currentStyle = [self styleMask];
          NSUInteger newStyle = style_mask_for_features(wf) | (currentStyle & ~usedStyles);
  
@@ -48,7 +50,7 @@
          self.preventsAppActivation = wf->prevents_app_activation;
  
          if (newStyle != currentStyle)
-@@ -1310,7 +1329,7 @@
+@@ -1310,7 +1330,7 @@
                  // Became floating.  If child of non-floating window, make that
                  // relationship latent.
                  WineWindow* parent = (WineWindow*)[self parentWindow];
@@ -57,13 +59,13 @@
                      [self becameIneligibleChild];
              }
              else
-@@ -1333,7 +1352,22 @@
+@@ -1333,8 +1353,23 @@
              [[WineApplicationController sharedController] adjustWindowLevels];
          }
  
 -        if (state->minimized_valid)
 +        if (state->minimized_valid && self.nativeHostWindow)
-+        {
+         {
 +            NSWindow* host = self.nativeHostWindow;
 +            pendingMinimize = FALSE;
 +            if (state->minimized && !host.miniaturized)
@@ -78,10 +80,11 @@
 +            else if (!state->minimized && host.miniaturized) [host deminiaturize:nil];
 +        }
 +        else if (state->minimized_valid)
-         {
++        {
              macdrv_event_mask discard = event_mask_for_type(WINDOW_DID_UNMINIMIZE);
  
-@@ -1565,7 +1599,7 @@
+             pendingMinimize = FALSE;
+@@ -1565,7 +1600,7 @@
      - (void) becameIneligibleChild
      {
          WineWindow* parent = (WineWindow*)[self parentWindow];
@@ -90,7 +93,7 @@
          {
              if (!parent->latentChildWindows)
                  parent->latentChildWindows = [[NSMutableArray alloc] init];
-@@ -1955,6 +1989,8 @@
+@@ -1963,6 +1998,8 @@
  
      - (void) setFrameFromWine:(NSRect)contentRect
      {
@@ -99,7 +102,7 @@
          /* Origin is (left, top) in a top-down space.  Need to convert it to
             (left, bottom) in a bottom-up space. */
          [[WineApplicationController sharedController] flipRect:&contentRect];
-@@ -2039,6 +2075,8 @@
+@@ -2047,6 +2084,8 @@
  
      - (void) setMacDrvParentWindow:(WineWindow*)parent
      {
@@ -108,7 +111,7 @@
          WineWindow* oldParent = (WineWindow*)[self parentWindow];
          if ((oldParent && oldParent != parent) || (!oldParent && latentParentWindow != parent))
          {
-@@ -2454,7 +2492,7 @@
+@@ -2462,7 +2501,7 @@
      {
          if (causing_becomeKeyWindow == self) return YES;
          if (self.disabled || self.noForeground) return NO;
@@ -117,7 +120,7 @@
  
          // If a window's collectionBehavior says it participates in cycling,
          // it must return YES from this method to actually be eligible.
-@@ -2463,6 +2501,7 @@
+@@ -2471,6 +2510,7 @@
  
      - (BOOL) canBecomeMainWindow
      {
@@ -125,7 +128,7 @@
          return [self canBecomeKeyWindow];
      }
  
-@@ -2711,7 +2750,8 @@
+@@ -2719,7 +2759,8 @@
           */
          if (stage_manager_enabled())
          {
@@ -135,7 +138,7 @@
              return;
          }
  
-@@ -4207,3 +4247,19 @@
+@@ -4222,3 +4263,19 @@
              [[window contentView] clearMarkedText];
      });
  }
