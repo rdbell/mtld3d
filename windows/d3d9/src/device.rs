@@ -298,6 +298,12 @@ bitflags::bitflags! {
     }
 }
 
+/// Mid-pass cap on a held continuation, in multiples of `render.submitDraws`.
+///
+/// With `render.submitAtPassBoundary`, a pass that never changes render target 0 still sends
+/// its work after this many thresholds' worth of draws.
+const PASS_BOUNDARY_SUBMIT_CAP: u32 = 4;
+
 pub struct DeviceInner {
     // Metal handles / presentation.
     device_handle: MetalHandle<MTLDeviceKind>,
@@ -434,6 +440,8 @@ pub struct DeviceInner {
     /// Optional continuation cadence; zero retains whole-frame submission.
     render_submit_draws: u32,
     pending_draw_count: u32,
+    /// Hold a due continuation until render target 0 changes (see `split_at_pass_boundary`).
+    submit_at_pass_boundary: bool,
     /// Shared with the encoder thread and the unix completion handler.
     ///
     /// The frame's submit seq is stamped in `stamp_and_swap`; this atomic
@@ -1845,13 +1853,40 @@ impl DeviceInner {
         self.current_frame.push_op_inline(op);
         if self.render_submit_draws != 0 && is_draw {
             self.pending_draw_count += 1;
-            if self.pending_draw_count >= self.render_submit_draws {
+            // Splitting mid-pass costs the GPU a store and a reload of every attachment of
+            // the open pass (a full-size target each time); when the continuation waits for
+            // render target 0 to change, that pass boundary exists anyway. The cap keeps a
+            // single long pass submitting early.
+            let due = if self.submit_at_pass_boundary {
+                self.render_submit_draws
+                    .saturating_mul(PASS_BOUNDARY_SUBMIT_CAP)
+            } else {
+                self.render_submit_draws
+            };
+            if self.pending_draw_count >= due {
                 // Use the existing continuation rules and bounded channel.
                 // Readback still drains this queue and waits for GPU completion.
                 let fresh = self.fresh_frame();
                 let (frame, _) = self.stamp_and_swap(fresh, true);
                 self.encoder.send_frame(frame);
             }
+        }
+    }
+
+    /// Send the due continuation before render target 0 changes to `next`.
+    ///
+    /// With `render.submitAtPassBoundary`, a continuation that `push_op_inline` found due
+    /// waits for this point: the open pass ends here regardless, so submitting now adds no
+    /// attachment store or reload. Rebinding the same surface is not a boundary.
+    pub fn split_at_pass_boundary(&mut self, next: *mut Direct3DSurface9) {
+        if self.submit_at_pass_boundary
+            && self.render_submit_draws != 0
+            && self.pending_draw_count >= self.render_submit_draws
+            && self.bound_rt.render_target(0) != next
+        {
+            let fresh = self.fresh_frame();
+            let (frame, _) = self.stamp_and_swap(fresh, true);
+            self.encoder.send_frame(frame);
         }
     }
 
@@ -2524,6 +2559,7 @@ impl Direct3DDevice9 {
             current_frame: info.current_frame,
             render_submit_draws: crate::config::CONFIG.render_submit_draws,
             pending_draw_count: 0,
+            submit_at_pass_boundary: crate::config::CONFIG.render_submit_at_pass_boundary,
             coherent_seq,
             upload_coherent_seq,
             failed_submit_seq,
@@ -8035,6 +8071,9 @@ extern "system" fn device_set_render_target(
     }
     dev.cur_autogen_rt_ids[slot] = new_autogen;
 
+    if slot == 0 {
+        dev.split_at_pass_boundary(surf);
+    }
     dev.bound_rt_mut()
         .replace_render_target(slot, surf, desc.width, desc.height);
 

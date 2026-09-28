@@ -144,6 +144,12 @@ pub struct Mtld3dConfig {
     /// depth and does not present. Small values add render-pass store/load
     /// traffic. Default: `0`. File key: `render.submitDraws`.
     pub render_submit_draws: u32,
+    /// Defer a due `render.submitDraws` continuation to the next render-target-0 change.
+    ///
+    /// The open pass ends there anyway, so the split adds no attachment store or reload; a
+    /// single long pass still splits after four times the threshold. Default: `false`. File
+    /// key: `render.submitAtPassBoundary`.
+    pub render_submit_at_pass_boundary: bool,
     /// Merge independent single-sample passes. Experimental, default false.
     ///
     /// File key: `render.mergePasses`.
@@ -322,6 +328,7 @@ impl Default for Mtld3dConfig {
             skip_shaders: Vec::new(),
             query_flush_immediate: false,
             render_submit_draws: 0,
+            render_submit_at_pass_boundary: false,
             render_merge_passes: false,
             depth_alias_same_size: false,
             buffer_ignore_lock_bounds: false,
@@ -472,6 +479,10 @@ pub fn log_options(cfg: &Mtld3dConfig) {
         target: crate::LOG_TARGET,
         "config: render.submitDraws = {}", cfg.render_submit_draws
     );
+    info!(
+        target: crate::LOG_TARGET,
+        "config: render.submitAtPassBoundary = {}", cfg.render_submit_at_pass_boundary
+    );
     info!(target: crate::LOG_TARGET, "config: render.mergePasses = {}", cfg.render_merge_passes);
     info!(
         target: crate::LOG_TARGET,
@@ -561,6 +572,9 @@ fn apply(cfg: &mut Mtld3dConfig, source: &str, key: &str, value: &str) {
             Err(_) => log::warn!(target: crate::LOG_TARGET,
                 "{source}: invalid render.submitDraws {value:?}, expected a nonnegative integer"),
         },
+        "render.submitAtPassBoundary" => {
+            assign_bool(source, key, value, &mut cfg.render_submit_at_pass_boundary);
+        }
         "render.mergePasses" => assign_bool(source, key, value, &mut cfg.render_merge_passes),
         "depth.aliasSameSize" => assign_bool(source, key, value, &mut cfg.depth_alias_same_size),
         "buffer.ignoreLockBounds" => {

@@ -925,12 +925,16 @@ impl FfState {
     #[must_use]
     pub fn inverse(mat: &D3DMATRIX) -> Option<D3DMATRIX> {
         /// `a * d - b * c`, the 2x2 minor.
+        ///
+        /// Array sums, not `mul_add`: on the no-FMA i686 baseline `mul_add` is a ucrtbase
+        /// `fmaf` libcall, and Wine's software `fmaf` cost about 3% of the game thread in a
+        /// crowd, since this inverse is rebuilt with every vertex-shader constant block.
         fn det2(a: f32, b: f32, c: f32, d: f32) -> f32 {
-            a.mul_add(d, -(b * c))
+            [a * d, -(b * c)].iter().sum()
         }
         /// `a0 * x0 + a1 * x1 + a2 * x2`, one cofactor row.
         fn sum3(a0: f32, x0: f32, a1: f32, x1: f32, a2: f32, x2: f32) -> f32 {
-            a0.mul_add(x0, a1.mul_add(x1, a2 * x2))
+            [a0 * x0, a1 * x1, a2 * x2].iter().sum()
         }
         let m = &mat.m;
         // Cofactor expansion over the 2x2 minors of rows 0-1 (`s`) and rows

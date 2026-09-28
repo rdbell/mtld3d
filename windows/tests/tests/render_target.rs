@@ -5022,3 +5022,125 @@ fn successive_submits_preserve_up_data_across_readback_continuations() {
     }
     assert_eq!(h.set_render_target(0, &backbuffer), 0);
 }
+
+/// Two triangles covering clip `x0..x1` across the full height, sampling `u0..u1`.
+fn textured_band(x0: f32, x1: f32, u0: f32, u1: f32) -> [TexturedVertex; 6] {
+    let v = |x: f32, y: f32, u: f32, v: f32| TexturedVertex {
+        x,
+        y,
+        z: 0.5,
+        color: WHITE,
+        u,
+        v,
+    };
+    [
+        v(x0, 1.0, u0, 0.0),
+        v(x1, 1.0, u1, 0.0),
+        v(x0, -1.0, u0, 1.0),
+        v(x1, 1.0, u1, 0.0),
+        v(x1, -1.0, u1, 1.0),
+        v(x0, -1.0, u0, 1.0),
+    ]
+}
+
+/// FFXI's character pattern: draw into A, then B, then sample B into A, then overwrite B.
+///
+/// With `render.submitAtPassBoundary` every render-target change below sends a continuation
+/// (`submitDraws=1`), so each target's content must survive the split, and B's later
+/// overwrite must not reach the A pass that sampled it before the split.
+#[test]
+fn pass_boundary_submission_keeps_ping_pong_targets() {
+    let merged = format!(
+        "{};render.submitDraws=1;render.submitAtPassBoundary=true",
+        std::env::var("MTLD3D_CONFIG").unwrap_or_default()
+    );
+    // SAFETY: nextest gives each test its own process; no harness threads exist yet.
+    unsafe { std::env::set_var("MTLD3D_CONFIG", merged) };
+
+    let h = Harness::new();
+    let make = || {
+        h.create_texture(
+            256,
+            256,
+            1,
+            D3DUSAGE_RENDERTARGET,
+            D3DFMT_A8R8G8B8,
+            D3DPOOL_DEFAULT,
+        )
+    };
+    let (a, b) = (make(), make());
+    let (a_surface, b_surface) = (a.surface_level(0), b.surface_level(0));
+    let backbuffer = h.render_target(0);
+    for (state, value) in [
+        (D3DTSS_COLOROP, D3DTOP_MODULATE),
+        (D3DTSS_COLORARG1, D3DTA_TEXTURE),
+        (D3DTSS_COLORARG2, D3DTA_DIFFUSE),
+        (D3DTSS_ALPHAOP, D3DTOP_SELECTARG1),
+        (D3DTSS_ALPHAARG1, D3DTA_TEXTURE),
+    ] {
+        assert_eq!(h.set_texture_stage_state(0, state, value), 0, "TSS");
+    }
+    for (state, value) in [
+        (D3DSAMP_MINFILTER, D3DTEXF_POINT),
+        (D3DSAMP_MAGFILTER, D3DTEXF_POINT),
+        (D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP),
+        (D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP),
+    ] {
+        assert_eq!(h.set_sampler_state(0, state, value), 0, "sampler");
+    }
+    assert_eq!(h.set_render_state(D3DRS_LIGHTING, 0), 0, "lighting off");
+    let fill = |target: &Surface<'_>, color: u32| {
+        assert_eq!(h.set_render_target(0, target), 0, "bind target");
+        assert_eq!(h.clear_texture(0), 0, "no texture for a fill");
+        assert_eq!(h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE), 0, "SetFVF");
+        assert_eq!(
+            h.draw_primitive_up(D3DPT_TRIANGLELIST, 1, &fullscreen_triangle(color)),
+            0,
+            "fill"
+        );
+    };
+
+    assert_eq!(h.begin_scene(), 0);
+    fill(&a_surface, RED);
+    fill(&b_surface, GREEN);
+    // Left half of A takes B's green; the right half keeps A's red.
+    assert_eq!(h.set_render_target(0, &a_surface), 0, "back to A");
+    assert_eq!(h.set_texture(0, &b), 0, "sample B");
+    assert_eq!(
+        h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1),
+        0,
+        "SetFVF TEX1"
+    );
+    assert_eq!(
+        h.draw_primitive_up(D3DPT_TRIANGLELIST, 2, &textured_band(-1.0, 0.0, 0.0, 0.5)),
+        0,
+        "composite"
+    );
+    // Overwriting B after A consumed it must not change A.
+    fill(&b_surface, BLUE);
+    assert_eq!(h.set_render_target(0, &backbuffer), 0, "backbuffer");
+    assert_eq!(h.set_texture(0, &a), 0, "sample A");
+    assert_eq!(
+        h.set_fvf(D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1),
+        0,
+        "SetFVF TEX1"
+    );
+    assert_eq!(
+        h.draw_primitive_up(D3DPT_TRIANGLELIST, 2, &textured_band(-1.0, 1.0, 0.0, 1.0)),
+        0,
+        "show A"
+    );
+    assert_eq!(h.end_scene(), 0);
+    assert_eq!(h.present(), 0);
+
+    assert_eq!(
+        h.read_pixel(160, 240),
+        GREEN,
+        "A lost the composite of B across the split"
+    );
+    assert_eq!(
+        h.read_pixel(480, 240),
+        RED,
+        "A lost its own content across the split"
+    );
+}
