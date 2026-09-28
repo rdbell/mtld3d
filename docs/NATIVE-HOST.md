@@ -55,6 +55,17 @@ Unsupported MSAA and nonzero auto-depth formats are rejected before changing
 window ownership. Later GPU allocation failures are not transactional and do
 not promise restoration of the previous native-fullscreen state.
 
+## Display changes
+
+When a display is removed or returns (a monitor powering off and on), Wine shrinks the game's
+Win32 window to fit the displays of the moment. Its request to resize the Cocoa window is ignored
+while the host owns it, so the game drew into part of the window until the window was moved or
+resized. After a forwarded screen-parameters change, the host checks for about eight seconds
+whether the game view still fills the window (Wine's frame leaves a 4-point inset in normal play;
+anything over 16 counts) and, if not, posts `NSWindowDidResizeNotification` for the child, which
+makes Wine send the window's frame back to the Win32 side as a drag would. Verified by the user on
+an LG TV power cycle, 2026-09-28: the view went from 1024x742 back to 1920x1080 within a second.
+
 ## Validation of the original host, before picture controls
 
 The picture-controls addition has a successful production build and user manual

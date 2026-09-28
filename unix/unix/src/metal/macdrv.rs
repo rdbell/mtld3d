@@ -563,6 +563,7 @@ fn install_screen_params_filter(mtm: objc2::MainThreadMarker) {
         // SAFETY: the notification pointer is valid for the handler's
         // duration; Wine implements this optional delegate method.
         unsafe { delegate.applicationDidChangeScreenParameters(notification.as_ref()) };
+        native_host::after_display_change();
     });
     // SAFETY: objc2 typed binding; the center copies the block, and the
     // token is leaked below so the observer is never removed.

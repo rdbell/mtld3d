@@ -383,6 +383,59 @@ impl Host {
     }
 }
 
+/// Refit the hosted game after a display configuration change. **Main thread only.**
+///
+/// Wine answers a display change on the Win32 side, which can shrink the game's Win32 window
+/// to fit the displays of the moment. Its request to resize the Cocoa window is ignored while
+/// the host owns it, so the window keeps its size while Wine's views follow the smaller Win32
+/// rectangle: the game draws into part of the window until a move or resize makes Wine read
+/// the frame again. The Win32 side settles over a few seconds, so the check repeats.
+pub fn after_display_change() {
+    resend_frame_if_stale();
+    std::thread::spawn(|| {
+        for delay_ms in [250, 750, 1000, 2000, 4000] {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            super::run_on_main_thread_async(resend_frame_if_stale);
+        }
+    });
+}
+
+/// Largest gap, in points, between the game view and the window it hosts in normal play.
+///
+/// Wine's Win32 frame leaves a few points (4 measured) between the view and the content area.
+const VIEW_INSET_SLACK: f64 = 16.0;
+
+/// Post the child's frame to Wine again when the game view no longer fills the window.
+fn resend_frame_if_stale() {
+    let Some(host) = current() else {
+        return;
+    };
+    let Some(content) = host.child.contentView() else {
+        return;
+    };
+    // SAFETY: the hosted view outlives the host; detach runs before Wine releases it.
+    let view = unsafe { &*(host.view as *const NSView) };
+    let drawn = view.convertRect_toView(view.bounds(), None);
+    let window = content.frame();
+    if window.size.width - drawn.size.width <= VIEW_INSET_SLACK
+        && window.size.height - drawn.size.height <= VIEW_INSET_SLACK
+    {
+        return;
+    }
+    info!(target: LOG_TARGET,
+        "native host: game view {:.0}x{:.0} in a {:.0}x{:.0} window after a display change; resending the frame to Wine",
+        drawn.size.width, drawn.size.height, window.size.width, window.size.height);
+    // Wine's window delegate answers a resize by posting the current frame to the Win32 side,
+    // the same path a drag takes.
+    // SAFETY: AppKit-exported notification-name constant, valid for the process lifetime.
+    let name = unsafe { objc2_app_kit::NSWindowDidResizeNotification };
+    // SAFETY: posting on the main thread to observers of a live window.
+    unsafe {
+        objc2_foundation::NSNotificationCenter::defaultCenter()
+            .postNotificationName_object(name, Some(&host.child));
+    }
+}
+
 /// Resolve the session override without touching `AppKit` on the submit thread.
 pub fn frame_limit(configured: u32) -> u32 {
     match FRAME_LIMIT.load(Ordering::Relaxed) {
